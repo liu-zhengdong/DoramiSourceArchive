@@ -131,6 +131,12 @@ export function OpmlPreview({
   };
 
   const chips = CHIP_META.filter((chip) => (counts[chip.key] || 0) > 0);
+  const quota = plan?.quota;
+  const quotaNote = quota && Number.isFinite(Number(quota.remaining)) && (
+    <p className="opml-note">
+      还可新建 {quota.remaining} 个自定源（已有 {quota.used}/{quota.max}，今日 {quota.daily_used}/{quota.daily_max}）
+    </p>
+  );
   const list = (
     <ul className="opml-list">
       {items.map((item) => {
@@ -195,6 +201,7 @@ export function OpmlPreview({
             <span className="sett-stat opml-filemeta">{filename} · {items.length} 条</span>
           </div>
           {chipRow}
+          {quotaNote}
           {duplicate}
           {list}
         </div>
@@ -216,6 +223,7 @@ export function OpmlPreview({
         <span className="sett-stat opml-filemeta">{filename} · {items.length} 条</span>
       </div>
       {chipRow}
+      {quotaNote}
       {duplicate}
       {list}
       <div className="sett-sync-foot opml-foot">
@@ -327,7 +335,7 @@ export default function OpmlSection({ showToast, onPushPreview }) {
         <span className="sett-id">
           <span className="sett-lbl">导出我的订阅</span>
           <div className="sett-sub">
-            生成 .opml 文件，可导入 Feedly、Reeder、Folo 等阅读器。
+            生成 .opml 文件，可导入 Feedly、Reeder、Folo 等阅读器。文件含订阅地址，请妥善保管。
             {summary && (
               <>
                 <br />

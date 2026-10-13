@@ -1535,6 +1535,8 @@ class OpmlImportParams(BaseModel):
 def _reader_opml_plan(request: Request, session: Session):
     app = _app()
     username = app.current_username(request)
+    # 与源栏同一份订阅并集:隐藏中的已订阅 RSS 仍导出,避免备份里静默缺一条。
+    # 文件不写隐藏标记;未订阅的隐藏源不在这份名单里。
     source_ids = app.resolve_subscribed_source_ids(session, username, include_hidden=True)
     return opml_service.export_plan(session, source_ids)
 

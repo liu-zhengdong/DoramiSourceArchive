@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
+import re
 import xml.etree.ElementTree as ET
 from email.utils import formatdate
 from typing import Any, Dict, List, Optional, Set
@@ -36,6 +37,8 @@ _SSRF_REASON = "内网地址，出于安全原因不可添加"
 _UNAVAILABLE_REASON = "该来源暂不可用"
 _FETCH_FAIL_REASON = "无法访问该地址，请检查 URL 或稍后再试"
 _ITEM_FAIL_REASON = "导入这一条时失败，请稍后重试"
+_DAILY_QUOTA_REASON = "今日新增自定源已达上限,请明天再试"
+_ENTITY_DECL_RE = re.compile(r"<!ENTITY", re.IGNORECASE)
 
 _PUBLIC_ITEM_FIELDS = (
     "title",
@@ -128,6 +131,26 @@ def _counts(items: List[Dict[str, Any]]) -> Dict[str, int]:
 
 # ==================== 导出 ====================
 
+def _export_feed_url(raw: str) -> Optional[str]:
+    """导出用的 feed 地址。普通地址规范化;含凭证的地址原样保留。
+
+    ``canonical_feed_url`` 会拒绝 userinfo。导出是读者自己的订阅备份,token、
+    签名和 userinfo 都要留下,由调用方转义后写入文件,不在这里改写成掩码。
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    if user_sources.feed_url_has_credentials(text):
+        parts = urlsplit(text)
+        if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+            return None
+        return text
+    try:
+        return user_sources.canonical_feed_url(text)
+    except ValueError:
+        return None
+
+
 def _outline_for_source(session: Session, source_id: str) -> Optional[Dict[str, Any]]:
     """订阅源里能写进 OPML 的真实 feed;没有 feed 地址则返回 None。"""
     from fetchers.registry import fetcher_registry
@@ -138,11 +161,8 @@ def _outline_for_source(session: Session, source_id: str) -> Optional[Dict[str, 
         if getattr(fetcher_class, "is_template", False):
             return None
         feed_url = str(getattr(fetcher_class, "feed_url", "") or "").strip()
-        if not feed_url:
-            return None
-        try:
-            xml_url = user_sources.canonical_feed_url(feed_url)
-        except ValueError:
+        xml_url = _export_feed_url(feed_url)
+        if not xml_url:
             return None
         html_url = str(getattr(fetcher_class, "source_url", "") or "").strip()
         return {
@@ -158,9 +178,8 @@ def _outline_for_source(session: Session, source_id: str) -> Optional[Dict[str, 
     source_type = (record.source_type or "").strip().lower()
     if source_type not in _RSS_SOURCE_TYPES:
         return None
-    try:
-        xml_url = user_sources.canonical_feed_url(record.url)
-    except ValueError:
+    xml_url = _export_feed_url(record.url)
+    if not xml_url:
         return None
     podcast = source_type in _PODCAST_SOURCE_TYPES or (
         (record.fetcher_id or "").strip().lower() == "generic_podcast_rss"
@@ -187,7 +206,11 @@ def _public_html_url(raw: str, xml_url: str) -> str:
 
 
 def export_plan(session: Session, source_ids: List[str]) -> Dict[str, Any]:
-    """把订阅名单分成可导出的 outline 与跳过的非 RSS 数量。"""
+    """把订阅名单分成可导出的 outline 与跳过的非 RSS 数量。
+
+    调用方传入的名单含已隐藏的订阅(与源栏保留「暂不可用」条目同一口径)。
+    这里仍导出其中的真实 feed,文件本身不标注隐藏或停用。
+    """
     outlines: List[Dict[str, Any]] = []
     seen: Set[str] = set()
     skipped = 0
@@ -242,6 +265,10 @@ def parse_opml_outlines(text: str) -> List[Dict[str, str]]:
         raise ValueError("请提供 OPML 文件")
     if len(raw) > OPML_MAX_CHARS:
         raise ValueError("OPML 文件过大")
+    # stdlib ElementTree 不解析外部实体,但会展开内部实体。先拒绝实体声明,
+    # 避免外部实体与 billion laughs;无内部子集的 PUBLIC DOCTYPE 仍可解析。
+    if _ENTITY_DECL_RE.search(raw):
+        raise ValueError("不是有效的 OPML 文件")
     try:
         root = ET.fromstring(raw)
     except ET.ParseError as exc:
@@ -396,16 +423,30 @@ async def _attach_preview(item: Dict[str, Any]) -> None:
     item["selectable"] = True
 
 
-def _apply_quota(session: Session, username: str, items: List[Dict[str, Any]]) -> None:
-    room = user_sources.MAX_SOURCES_PER_USER - len(
-        user_sources.subscribed_user_source_ids(session, username)
-    )
-    daily_room = user_sources.DAILY_ADD_LIMIT - user_sources.daily_created_count(session, username)
-    budget = max(0, min(room, daily_room))
+def _quota_snapshot(session: Session, username: str) -> Dict[str, int]:
+    used = len(user_sources.subscribed_user_source_ids(session, username))
+    daily_used = user_sources.daily_created_count(session, username)
+    room = user_sources.MAX_SOURCES_PER_USER - used
+    daily_room = user_sources.DAILY_ADD_LIMIT - daily_used
+    return {
+        "used": used,
+        "max": user_sources.MAX_SOURCES_PER_USER,
+        "daily_used": daily_used,
+        "daily_max": user_sources.DAILY_ADD_LIMIT,
+        "remaining": max(0, min(room, daily_room)),
+    }
+
+
+def _apply_quota(session: Session, username: str, items: List[Dict[str, Any]]) -> Dict[str, int]:
+    """同时卡住总数与当日新增。超出的新建行标为无效,不再计入可勾选数。"""
+    quota = _quota_snapshot(session, username)
+    room = quota["max"] - quota["used"]
+    daily_room = quota["daily_max"] - quota["daily_used"]
+    budget = quota["remaining"]
     reason = (
         f"自定源数量已达上限({user_sources.MAX_SOURCES_PER_USER} 个)"
         if room <= daily_room
-        else "今日新增自定源已达上限，请明天再试"
+        else _DAILY_QUOTA_REASON
     )
     seen = 0
     for item in items:
@@ -417,11 +458,12 @@ def _apply_quota(session: Session, username: str, items: List[Dict[str, Any]]) -
         item["status"] = "invalid"
         item["reason"] = reason
         item["selectable"] = False
+    return quota
 
 
 async def _classify(
     session: Session, username: str, outlines: List[Dict[str, str]]
-) -> List[Dict[str, Any]]:
+) -> tuple[List[Dict[str, Any]], Dict[str, int]]:
     import importlib
 
     app = importlib.import_module("api.app")
@@ -453,8 +495,8 @@ async def _classify(
         await asyncio.gather(*[_run(item) for item in pending])
     for item in items:
         item.pop("_needs_fetch", None)
-    _apply_quota(session, username, items)
-    return items
+    quota = _apply_quota(session, username, items)
+    return items, quota
 
 
 def _response(
@@ -465,12 +507,14 @@ def _response(
     created_count: int = 0,
     subscribed_count: int = 0,
     created_source_ids: Optional[List[str]] = None,
+    quota: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
     return {
         "dry_run": dry_run,
         "written": created_count + subscribed_count > 0,
         "limit": OPML_IMPORT_LIMIT,
         "duplicate_count": duplicate_count,
+        "quota": dict(quota or {}),
         "counts": _counts(items),
         "created_count": created_count,
         "subscribed_count": subscribed_count,
@@ -682,9 +726,9 @@ async def import_subscriptions(
     """预览或确认导入。dry_run 不写库;确认只处理选中的 new / matched_existing。"""
     outlines = parse_opml_outlines(text)
     unique, duplicate_count = _dedupe_outlines(outlines)
-    items = await _classify(session, username, unique)
+    items, quota = await _classify(session, username, unique)
     if dry_run:
-        return _response(items, dry_run=True, duplicate_count=duplicate_count)
+        return _response(items, dry_run=True, duplicate_count=duplicate_count, quota=quota)
 
     selected = _selected_urls(urls, items)
     created_count = 0
@@ -724,6 +768,7 @@ async def import_subscriptions(
         created_count=created_count,
         subscribed_count=subscribed_count,
         created_source_ids=created_source_ids,
+        quota=_quota_snapshot(session, username),
     )
 
 
