@@ -585,7 +585,8 @@ def test_admin_ranking_status_and_manual_refresh(monkeypatch, tmp_path):
 
     def _capture_refresh(engine, **kwargs):
         refresh_options.update(kwargs)
-        return original_refresh(engine, **kwargs)
+        # The route uses the wall clock; pin it to the seeded week so the fixture stays in the window.
+        return original_refresh(engine, **{"at": AT, **kwargs})
 
     monkeypatch.setattr(rankings, "build_snapshot_if_idle", _capture_refresh)
     refreshed = client.post("/api/admin/rankings/refresh")
@@ -650,3 +651,31 @@ def test_ranking_job_keeps_cron_frozen_but_allows_current_cutoff_catchup(monkeyp
         {"current_cutoff": False},
         {"current_cutoff": True},
     ]
+
+
+def test_configured_release_and_model_sources_stay_off_the_article_board(tmp_path):
+    """issue #178:「动态」并入文章后,配置化的版本发布 / 模型源仍不进文章榜(codex R1 #2)。"""
+    sink = DatabaseStorage(f"sqlite:///{tmp_path / 'configured-kinds.db'}")
+    with Session(sink.engine) as session:
+        for source_id, source_type, fetcher_id in (
+            ("custom_release", "github", "generic_github_releases"),
+            ("custom_models", "huggingface", "generic_huggingface_models"),
+            ("custom_repos", "github", "generic_github_repositories"),
+            ("custom_feed", "rss", ""),
+        ):
+            session.add(SourceConfigRecord(
+                source_id=source_id,
+                name=source_id,
+                source_type=source_type,
+                fetcher_id=fetcher_id,
+                url=f"https://example.test/{source_id}",
+                created_at=STAMP,
+                updated_at=STAMP,
+            ))
+        session.commit()
+        shapes = rankings._source_shapes(session)
+
+    assert shapes["custom_release"] == "excluded"
+    assert shapes["custom_models"] == "excluded"
+    assert shapes["custom_repos"] == "excluded"
+    assert shapes["custom_feed"] == "article"

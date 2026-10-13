@@ -46,10 +46,10 @@ from api.sources import (
     _friendly_source_name,
     _registry_source_meta,
     _source_category,
-    VALID_CONTENT_SHAPES,
     configured_source_content_type,
     configured_source_platform,
     configured_source_shape,
+    normalize_shape,
     source_shape,
     subscription_source_ids,
 )
@@ -65,6 +65,7 @@ from models.db import (
     SourceConfigRecord,
 )
 from services import accounts as accounts_service
+from services import content_classification
 from services import article_listen_guides as article_listen_guide_service
 from services import podcast_premium as podcast_premium_service
 from services import podcast_premium_guides as podcast_premium_guide_service
@@ -196,10 +197,6 @@ def _configured_source_meta(session: Session) -> Dict[str, Dict[str, Any]]:
     """SourceConfig 的读者目录元数据；尤其覆盖尚无产出的配置源形态。"""
     result: Dict[str, Dict[str, Any]] = {}
     for record in session.exec(select(SourceConfigRecord)).all():
-        try:
-            tags = json.loads(record.content_tags_json or "[]")
-        except (TypeError, json.JSONDecodeError):
-            tags = []
         result[record.source_id] = {
             "id": record.source_id,
             "name": record.name,
@@ -214,7 +211,6 @@ def _configured_source_meta(session: Session) -> Dict[str, Dict[str, Any]]:
             "source_channel": record.source_channel,
             "provenance_tier": record.provenance_tier,
             "base_url": record.base_url or record.url,
-            "content_tags": tags if isinstance(tags, list) else [],
         }
     return result
 
@@ -857,6 +853,18 @@ def _mark_all_read_response(app, session: Session, username: str, source_ids: Li
     return {"status": "success", "by_source": by_source, "total": sum(by_source.values())}
 
 
+def _mark_read_shape(shape: Optional[str]) -> str:
+    """标读端点的 shape:未传 = 不限容器;合法值与旧别名 bulletin 归一;其余非空值 400。
+
+    标读是写操作,把拼错的 shape 当「未传」会把全部订阅(含播客、社交)一并标读(codex R1 #9);
+    只读的列表与收藏仍按 ``normalize_shape`` 宽松处理。在任何读态写入之前调用。
+    """
+    shape_value = normalize_shape(shape)
+    if (shape or "").strip() and not shape_value:
+        raise HTTPException(status_code=400, detail="shape 取值无效")
+    return shape_value
+
+
 @router.post("/mark-all-read")
 def mark_all_read(
     request: Request,
@@ -865,14 +873,15 @@ def mark_all_read(
 ):
     """把当前用户订阅源标为已读（推进各源水位到当下），返回更新后的未读统计。
 
-    可选 shape=article|bulletin|social:只标对应形态的源，不越容器边界。
-    未传 = 全部订阅。
+    可选 shape=article|social|podcast:只标对应形态的源，不越容器边界。
+    未传 = 全部订阅。旧值 bulletin 视同 article(issue #178);其余非法值 400,不当未传处理——
+    那会把全部订阅标读。
     """
+    shape_value = _mark_read_shape(shape)
     app = _app()
     username = app.current_username(request)
     source_ids = app.resolve_subscribed_source_ids(session, username)
-    shape_value = (shape or "").strip().lower()
-    if shape_value in VALID_CONTENT_SHAPES:
+    if shape_value:
         registry_meta = _registry_source_meta()
         source_meta = {**_configured_source_meta(session), **registry_meta}
         content_types = _primary_content_types(session, source_ids)
@@ -899,6 +908,7 @@ def mark_scope_read(
     响应回报 ``marked`` 与更新后的订阅源未读统计(与 ``/mark-all-read`` 同形)。
     可见范围与 ``GET /api/articles`` 同尺:读者会话排除隐藏源与非我订阅的私有自定源,admin 会话不受限。
     """
+    shape_value = _mark_read_shape(shape)
     app = _app()
     username = app.current_username(request)
     auth_session = app.current_auth_session(request)
@@ -930,8 +940,7 @@ def mark_scope_read(
                 ~ArticleRecord.source_id.startswith(user_sources_service.USER_SOURCE_PREFIX, autoescape=True),
                 *([ArticleRecord.source_id.in_(my_user_ids)] if my_user_ids else []),
             ))
-        shape_value = (shape or "").strip().lower()
-        if shape_value in VALID_CONTENT_SHAPES:
+        if shape_value:
             query = query.where(content_shape_condition(shape_value, session))
         unread_cond = reader_state_service.unread_filter_condition(
             session, username=username, source_ids=subscribed, include_uncursored=True,
@@ -983,7 +992,7 @@ def list_favorites(
     """当前用户的收藏文章列表，按收藏时间倒序；同时回传全部收藏 ID 集合。
 
     join 文章表后，已被删除文章的孤儿收藏自然被过滤掉，不出现在列表里。
-    可选 shape=article|bulletin|social:容器内收藏过滤器。
+    可选 shape=article|social|podcast:容器内收藏过滤器(旧值 bulletin 视同 article)。
     """
     app = _app()
     auth_session = app.current_auth_session(request)
@@ -1027,8 +1036,8 @@ def list_favorites(
     if source_id:
         base = base.where(ArticleRecord.source_id == source_id)
         count_query = count_query.where(ArticleRecord.source_id == source_id)
-    shape_value = (shape or "").strip().lower()
-    if shape_value in VALID_CONTENT_SHAPES:
+    shape_value = normalize_shape(shape)
+    if shape_value:
         cond = content_shape_condition(shape_value, session)
         base = base.where(cond)
         count_query = count_query.where(cond)
@@ -1262,6 +1271,16 @@ def rotate_feed_token(request: Request, session: Session = Depends(deps.get_sess
 
 # ==================== 内容源目录 ====================
 
+def _source_kind_fields(source_id: str, content_type: Optional[str]) -> dict:
+    kind = content_classification.source_kind_prior(
+        source_id, content_type, content_classification.source_default_kinds()
+    )
+    return {
+        "default_kind": kind,
+        "default_kind_label": content_classification.item_kind_label(kind) or None,
+    }
+
+
 def _reader_sources_catalog(
     request: Request,
     session: Session,
@@ -1324,10 +1343,11 @@ def _reader_sources_catalog(
                 "source_channel": meta.get("source_channel", ""),
                 "provenance_tier": meta.get("provenance_tier", ""),
                 "base_url": meta.get("base_url", ""),
-                "content_tags": meta.get("content_tags", []),
                 "content_type": resolved_type,
                 "category": _source_category(resolved_type),
                 "shape": source_shape(source_id, resolved_type, source_meta),
+                # 来源的默认内容类型(issue #178):发现页源卡用它取代原「动态」签
+                **_source_kind_fields(source_id, resolved_type),
                 "platform": meta.get("platform") or "",
                 # 源栏优先使用 400x400 头像；同时保留原始 URL 供降级/调试。
                 "avatar_url": cached_profile.get("author_avatar_url_large")
@@ -1377,6 +1397,7 @@ def _reader_sources_catalog(
             entry["content_type"] = content_type
             entry["category"] = _source_category(content_type)
             entry["shape"] = source_shape(source_id, content_type, source_meta)
+            entry.update(_source_kind_fields(source_id, content_type))
 
     # 3. 已订阅但既未注册也无归档的来源也要出现，便于退订。
     for source_id in subscribed_ids:

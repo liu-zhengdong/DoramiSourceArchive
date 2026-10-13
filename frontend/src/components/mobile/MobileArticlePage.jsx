@@ -17,13 +17,13 @@ import { formatDateTime, formatPublishDate } from '../../utils/datetime';
 import { formatPodcastDuration, podcastOf } from '../../utils/podcast';
 import {
   analysisStatusMeta,
-  contentGenreLabel,
   displayAnalysisTags,
   shouldShowAiReadingCard,
 } from '../../utils/analysis';
 import AiReadingCard from '../AiReadingCard';
 import ArticleListenBar from '../ArticleListenBar';
 import { hostOf } from '../../utils/readerText';
+import { kindKickerLabel } from '../../utils/contentKind';
 
 // 正文页(移动波 Wave2,样页画面②):push 全屏页——无底部 Tab,返回即出栈。
 // 衬线标题/kicker/meta/速读卡/进度线/上一下一篇 全部复用阅读窗语法类
@@ -45,7 +45,7 @@ export default function MobileArticlePage({
     shareOpen, setShareOpen,
     showTranslation, translating, translatedBody, translatedTitle, activeIsChinese, handleTranslate,
     activeSummary, summarizing, handleSummarize,
-    prevArticle, nextArticle, activeIndex, selectArticle, searchForLabel,
+    prevArticle, nextArticle, activeIndex, selectArticle, searchForTag,
     refreshActiveArticle,
   } = rs;
 
@@ -141,12 +141,10 @@ export default function MobileArticlePage({
       {/* 换篇由 key 重建滚动区域；跨版式同篇的进度由 ReaderWorkspace 恢复。 */}
       <div className="m-read-scroll" key={activeArticle.id}>
         <header className="reader-pane-head">
-          {/* 标题区与桌面同源(眉头「源 · 体裁」/ 标题 / 署名行 / 标签小签);动作行不渲染,顶栏译钮承担 */}
+          {/* 标题区与桌面同源(眉头「源 · 类型」/ 标题 / 署名行 / 标签小签);动作行不渲染,顶栏译钮承担 */}
           <div className="reader-kicker">
             {(sourceNameMap[activeArticle.source_id] || activeArticle.source_id)}
-            {contentGenreLabel(activeArticle.content_genre)
-              ? ` · ${contentGenreLabel(activeArticle.content_genre)}`
-              : ''}
+            {kindKickerLabel(activeArticle) ? ` · ${kindKickerLabel(activeArticle)}` : ''}
           </div>
           <h1 className="reader-pane-title">
             {(showTranslation && translatedTitle) ? translatedTitle : (activeArticle.title || '（无标题）')}
@@ -178,8 +176,8 @@ export default function MobileArticlePage({
                 <AnalysisTagChip
                   key={`${tag.type || 'canonical'}-${tag.id || tag.code || tag.candidate_id || index}`}
                   tag={tag}
-                  onTemporarySearch={(label) => {
-                    searchForLabel(label);
+                  onSearch={(selectedTag) => {
+                    searchForTag(selectedTag);
                     (onLeaveForSearch || onBack)();
                   }}
                 />
