@@ -10,27 +10,6 @@
 > 标「版本号以实际发版为准」的段落是 tag 即发布(2026-09-14)后合入、尚未或刚刚发版的波次。
 > 阅读提示:据本文查「怎么来的」;判断现状以 CLAUDE.md 与代码为准。
 
-## issue #179 读者侧 OPML 导入导出(分支 `cursor/reader-opml-import-export-1f7d`,版本号以实际发版为准)
-
-读者在设置 → 通用 →「订阅源 OPML」(排在「外观」之后,不新开导航组)导出自己的订阅,或导入一份 OPML。
-导出只写当前读者已订阅的 RSS / Atom / 播客 feed(`services/opml.py`):注册源看非模板抓取器的 `feed_url`,
-配置源看 `source_type` 为 rss / atom / podcast / podcast_rss 的地址;网页、X、GitHub、arXiv、日报等没有真实 feed
-的来源跳过,不伪造 xmlUrl,跳过数回到设置页和导出响应头。播客 outline 带 `category="podcast"`。
-
-导入默认 dry-run。每条给出 new / already_subscribed / matched_existing / invalid / rejected_ssrf。
-按规范化 feed URL 去重;命中已有公共源或同 URL 自定源则订阅那一条,不另建。确认时新建复用
-`prepare_user_source`(SSRF、大小上限、配额、写锁)和既有单源订阅写入。单次最多 200 条带 xmlUrl 的 outline,
-再导入同一文件是幂等的。新建自定源的首抓放在响应之后的后台任务里,避免一次请求同步抓最多 200 个 feed。
-
-有意偏离 RFC 草稿与样页:不做管理端 OPML;导航文案用「订阅源 OPML」而不是「订阅导入导出」;
-手机上的导入预览是设置栈里单独一屏(样页注记曾写成在分区页内展开);首抓不阻塞确认请求。
-
-检视补记:预览同时按自定源总数(20)和当日新增(10)把超出的新建行标为无效,并带回剩余配额。
-确认不信任预览载荷,每条重跑规范化、SSRF 与隐藏/停用检查;单条配额拒绝留在该行,其余继续。
-撞上隐藏或管理员停用的地址只显示「该来源暂不可用」,不回名称。已订阅的隐藏 RSS 仍导出
-(与源栏保留该订阅一致),文件不标注隐藏。含凭证的 feed 地址原样写入导出文件,设置页提示文件含订阅地址、需妥善保管。
-OPML 正文有 100 万字符上限;实体声明直接拒绝,解析错误视为无效文件。确认导入占用既有订阅写锁。
-
 ## issue #178 内容分类第一波(分支 `feat/issue-178-content-kind`,版本号以实际发版为准)
 
 2026-10-12 讨论定案(issue #178,样页 `docs/design/dorami-classification-scores-quiet.html`):定位扩展为「资讯 + 值得深读 /
