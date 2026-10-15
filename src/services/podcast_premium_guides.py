@@ -21,7 +21,7 @@ from sqlalchemy import case, func, or_
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
-from config import PodcastConfig, settings
+from config import PodcastConfig
 from models.db import (
     ArticleAnalysisRecord,
     ArticleRecord,
@@ -192,12 +192,77 @@ def _now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="microseconds")
 
 
-# Capacity shortages are recoverable. The wait uses the same fallback delay as
-# podcast processing ``retry_wait`` (``podcast_worker.fallback_retry_seconds``).
+# Capacity shortages wait, then become a terminal failure that keeps error_code.
+# Delays are 5 min, 30 min, 2 h, then 6 h. This is independent of the ASR
+# knob ``podcast_worker.fallback_retry_seconds`` (that one stays at ~30s).
 CAPACITY_RETRY_CODES = {
     "tts_receipt_cache_full": "TTS 回执缓存不足，请在播客管理台检查缺口并安全归档已完成回执",
     "tts_receipt_disk_full": "TTS 回执所在磁盘空间不足，请在播客管理台检查磁盘缺口",
 }
+CAPACITY_RETRY_DELAYS_SECONDS = (5 * 60, 30 * 60, 2 * 60 * 60)
+CAPACITY_RETRY_DELAY_CAP_SECONDS = 6 * 60 * 60
+CAPACITY_RETRY_MAX_ATTEMPTS = 8
+
+
+def _capacity_retry_delay_seconds(attempt: int) -> int:
+    if attempt <= len(CAPACITY_RETRY_DELAYS_SECONDS):
+        return CAPACITY_RETRY_DELAYS_SECONDS[attempt - 1]
+    return CAPACITY_RETRY_DELAY_CAP_SECONDS
+
+
+def _guide_retry_attempts(guide: dict) -> int:
+    try:
+        return max(0, int(guide.get("retry_attempts") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _capacity_wait_already_recorded(guide: dict, code: str) -> bool:
+    """Ignore the second ``fail_premium_guide`` of one shortage.
+
+    ``run_premium_guide`` records the error and re-raises; the scheduler
+    records it again. A later real failure first moves the guide to
+    ``synthesizing``, so the next call increments.
+    """
+
+    status = str(guide.get("status") or "")
+    if str(guide.get("error_code") or "") != code:
+        return False
+    if status == "failed" and not str(guide.get("next_retry_at") or "").strip():
+        return True
+    if status != "retry_wait":
+        return False
+    raw = str(guide.get("next_retry_at") or "").strip()
+    try:
+        retry_at = dt.datetime.fromisoformat(raw)
+    except ValueError:
+        return False
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=dt.timezone.utc)
+    return retry_at > dt.datetime.now(dt.timezone.utc)
+
+
+def premium_guide_auto_schedule_allowed(engine: Engine, episode_id: str) -> bool:
+    """Whether the worker may start this episode right now.
+
+    A force command owns ``queued`` (it already scheduled once and cleared
+    ``next_retry_at``). A capacity wait starts only after ``next_retry_at``.
+    A candidate list captured before that change must not start a second run.
+    """
+
+    with Session(engine) as session:
+        episode = session.get(ArticleRecord, episode_id)
+        if episode is None:
+            return False
+        guide = _extensions(episode).get("premium_guide")
+    if not isinstance(guide, dict):
+        return True
+    status = str(guide.get("status") or "")
+    if status in {"", "not_started"}:
+        return True
+    if status == "retry_wait":
+        return _premium_guide_retry_due(guide)
+    return False
 
 
 def _premium_guide_retry_due(guide: dict, *, now: dt.datetime | None = None) -> bool:
@@ -362,6 +427,7 @@ def _set_episode_status(
     guide_metadata: dict[str, Any] | None = None,
     next_retry_at: str = "",
     error_code: str = "",
+    retry_attempts: int | None = None,
 ) -> None:
     with Session(engine) as session:
         episode = session.get(ArticleRecord, episode_id)
@@ -396,9 +462,19 @@ def _set_episode_status(
             guide["next_retry_at"] = next_retry_at
             if error_code:
                 guide["error_code"] = error_code[:120]
+            if retry_attempts is not None:
+                guide["retry_attempts"] = int(retry_attempts)
+        elif status == "failed" and error_code:
+            # Terminal capacity failure keeps the receipt code and the count.
+            guide.pop("next_retry_at", None)
+            guide["error_code"] = error_code[:120]
+            if retry_attempts is not None:
+                guide["retry_attempts"] = int(retry_attempts)
         else:
             guide.pop("next_retry_at", None)
             guide.pop("error_code", None)
+            if status == "ready":
+                guide.pop("retry_attempts", None)
         if error:
             guide["error"] = error[:300]
         else:
@@ -426,9 +502,28 @@ def fail_premium_guide(
 
     code = error.code if isinstance(error, BailianSpeechError) else ""
     if code in CAPACITY_RETRY_CODES:
-        delay = settings.podcast_worker.fallback_retry_seconds
+        with Session(engine) as session:
+            episode = session.get(ArticleRecord, episode_id)
+            guide = _extensions(episode).get("premium_guide") if episode is not None else {}
+        if not isinstance(guide, dict):
+            guide = {}
+        if _capacity_wait_already_recorded(guide, code):
+            return
+        attempts = _guide_retry_attempts(guide) + 1
+        if attempts > CAPACITY_RETRY_MAX_ATTEMPTS:
+            _set_episode_status(
+                engine,
+                episode_id,
+                "failed",
+                error=CAPACITY_RETRY_CODES[code],
+                failed_stage=failed_stage,
+                error_code=code,
+                retry_attempts=attempts,
+            )
+            return
         retry_at = (
-            dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=delay)
+            dt.datetime.now(dt.timezone.utc)
+            + dt.timedelta(seconds=_capacity_retry_delay_seconds(attempts))
         ).isoformat(timespec="microseconds")
         _set_episode_status(
             engine,
@@ -438,6 +533,7 @@ def fail_premium_guide(
             failed_stage=failed_stage,
             next_retry_at=retry_at,
             error_code=code,
+            retry_attempts=attempts,
         )
         return
     message = str(error).strip() or type(error).__name__
@@ -1232,6 +1328,11 @@ def prepare_forced_premium_guide(
         )
         guide.pop("error", None)
         guide.pop("failed_stage", None)
+        # Drop the automatic timer so the worker scan cannot start a second
+        # run beside this force. retry_attempts stays, so a force does not
+        # reset the capacity cap. The caller schedules this key once.
+        guide.pop("next_retry_at", None)
+        guide.pop("error_code", None)
         extensions["premium_guide"] = guide
         extensions["processing_status"] = "queued"
         episode.extensions_json = json.dumps(
@@ -1492,11 +1593,13 @@ def pending_premium_guide_candidates(
             status = str(guide.get("status") or extensions.get("processing_status") or "")
             current_mode = str(guide.get("mode") or "")
             # Due capacity waits re-enter this scan. A future next_retry_at stays
-            # out, and terminal failures stay out.
+            # out, and terminal failures stay out. ``queued`` is a force command:
+            # prepare clears next_retry_at and the force endpoint schedules once,
+            # so this scan must not start that episode as well.
             if status == "retry_wait":
                 if not _premium_guide_retry_due(guide):
                     continue
-            elif status in {"summarizing", "synthesizing", "failed"}:
+            elif status in {"queued", "summarizing", "synthesizing", "failed"}:
                 continue
             if status == "ready" and current_mode == eligibility.mode:
                 publication = session.get(

@@ -784,6 +784,12 @@ def schedule_podcast_premium_guide(episode_id: str) -> bool:
     existing = _PODCAST_PREMIUM_GUIDE_TASKS.get(episode_id)
     if existing is not None and not existing.done():
         return False
+    # A force already cleared next_retry_at and scheduled once. A stale
+    # candidate list must not start that episode, or a capacity wait, early.
+    if not podcast_premium_guide_service.premium_guide_auto_schedule_allowed(
+        db_sink.engine, episode_id
+    ):
+        return False
 
     async def _run() -> None:
         try:
@@ -2818,7 +2824,7 @@ async def execute_tts_receipt_reclaim_job():
     except Exception:  # noqa: BLE001 - maintenance must not stop the scheduler
         _dorami_logger.warning("TTS 回执定时回收失败", exc_info=True)
         return
-    if result.get("compressed_wavs"):
+    if result.get("compressed_wavs") or result.get("removed_wavs"):
         _dorami_logger.info("TTS 回执定时回收: %s", result)
 
 

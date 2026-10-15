@@ -24,12 +24,15 @@ from models.db import (
 from services.podcast_artifacts import PodcastArtifactStore
 from services.podcast_premium import dashboard
 from services.podcast_premium_guides import (
+    CAPACITY_RETRY_MAX_ATTEMPTS,
     PremiumGuideDraft,
     PremiumGuideForceError,
     SynthesizedAudio,
     _set_episode_status,
+    fail_premium_guide,
     list_premium_guide_tasks,
     pending_premium_guide_candidates,
+    premium_guide_auto_schedule_allowed,
     prepare_forced_premium_guide,
     run_premium_guide,
 )
@@ -277,7 +280,6 @@ def test_only_capacity_errors_enter_retry_wait(tmp_path, code):
 
 
 def test_capacity_wait_retries_tts_without_another_supplier_or_llm_call(tmp_path):
-    from config import settings
     from config_bailian import BailianSpeechConfig
     from models.db import BailianTtsCallRecord
     from services.bailian_speech_client import BailianSpeechError
@@ -372,10 +374,10 @@ def test_capacity_wait_retries_tts_without_another_supplier_or_llm_call(tmp_path
         }
     assert guide["status"] == "retry_wait"
     assert guide["error_code"] == "tts_receipt_cache_full"
+    assert guide["retry_attempts"] == 1
     retry_at = dt.datetime.fromisoformat(guide["next_retry_at"])
-    delay = settings.podcast_worker.fallback_retry_seconds
     remaining = retry_at - dt.datetime.now(dt.timezone.utc)
-    assert dt.timedelta(seconds=delay - 15) <= remaining <= dt.timedelta(seconds=delay + 5)
+    assert dt.timedelta(seconds=300 - 15) <= remaining <= dt.timedelta(seconds=300 + 5)
     assert "episode-force" not in pending_premium_guide_candidates(
         sink.engine, minimum_duration_seconds=config.premium_min_duration_seconds,
         score_threshold=config.premium_score_threshold,
@@ -400,8 +402,129 @@ def test_capacity_wait_retries_tts_without_another_supplier_or_llm_call(tmp_path
         guide = json.loads(session.get(ArticleRecord, "episode-force").extensions_json)["premium_guide"]
         rows = session.exec(select(BailianTtsCallRecord)).all()
         assert guide["status"] == "ready"
+        assert "retry_attempts" not in guide
+        assert "next_retry_at" not in guide
+        assert "error_code" not in guide
         assert {row.id: row.request_id for row in rows} == first_ids
         assert {row.status for row in rows} == {"succeeded"}
+
+
+def _force_guide(sink: DatabaseStorage) -> dict:
+    with Session(sink.engine) as session:
+        episode = session.get(ArticleRecord, "episode-force")
+        return json.loads(episode.extensions_json)["premium_guide"]
+
+
+def _eligible_force_sink(tmp_path, name: str) -> DatabaseStorage:
+    sink = DatabaseStorage(f"sqlite:///{tmp_path / name}")
+    _seed_force_candidate(sink, duration=21 * 60)
+    with Session(sink.engine) as session:
+        analysis = session.get(ArticleAnalysisRecord, "episode-force")
+        analysis.quality_score = 9.0
+        analysis.podcast_final_score = 9.0
+        session.add(analysis)
+        session.commit()
+    return sink
+
+
+def test_capacity_retry_backs_off_and_stops_after_eight_attempts(tmp_path):
+    from services.bailian_speech_client import BailianSpeechError
+
+    sink = _eligible_force_sink(tmp_path, "backoff.db")
+    config = _external_config()
+    error = BailianSpeechError("tts_receipt_cache_full")
+    scope = dict(
+        minimum_duration_seconds=config.premium_min_duration_seconds,
+        score_threshold=config.premium_score_threshold,
+    )
+
+    fail_premium_guide(sink.engine, "episode-force", error)
+    fail_premium_guide(sink.engine, "episode-force", error)
+    guide = _force_guide(sink)
+    assert guide["status"] == "retry_wait"
+    assert guide["retry_attempts"] == 1
+    assert guide["error_code"] == "tts_receipt_cache_full"
+    remaining = dt.datetime.fromisoformat(guide["next_retry_at"]) - dt.datetime.now(dt.timezone.utc)
+    assert dt.timedelta(seconds=300 - 15) <= remaining <= dt.timedelta(seconds=300 + 5)
+    assert "episode-force" not in pending_premium_guide_candidates(sink.engine, **scope)
+
+    expected = {2: 30 * 60, 3: 2 * 60 * 60, 4: 6 * 60 * 60}
+    for attempt, delay in expected.items():
+        _set_episode_status(sink.engine, "episode-force", "synthesizing")
+        fail_premium_guide(sink.engine, "episode-force", error)
+        guide = _force_guide(sink)
+        assert guide["retry_attempts"] == attempt
+        assert guide["status"] == "retry_wait"
+        remaining = dt.datetime.fromisoformat(guide["next_retry_at"]) - dt.datetime.now(dt.timezone.utc)
+        assert dt.timedelta(seconds=delay - 15) <= remaining <= dt.timedelta(seconds=delay + 5)
+
+    with Session(sink.engine) as session:
+        episode = session.get(ArticleRecord, "episode-force")
+        extensions = json.loads(episode.extensions_json)
+        extensions["premium_guide"]["status"] = "synthesizing"
+        extensions["premium_guide"]["retry_attempts"] = CAPACITY_RETRY_MAX_ATTEMPTS
+        extensions["processing_status"] = "synthesizing"
+        episode.extensions_json = json.dumps(extensions)
+        session.add(episode)
+        session.commit()
+    fail_premium_guide(sink.engine, "episode-force", error)
+    fail_premium_guide(sink.engine, "episode-force", error)
+    guide = _force_guide(sink)
+    assert guide["status"] == "failed"
+    assert guide["error_code"] == "tts_receipt_cache_full"
+    assert guide["retry_attempts"] == CAPACITY_RETRY_MAX_ATTEMPTS + 1
+    assert "next_retry_at" not in guide
+    assert "回执缓存不足" in guide["error"]
+    assert "episode-force" not in pending_premium_guide_candidates(sink.engine, **scope)
+
+
+def test_force_during_retry_wait_clears_the_timer_and_is_not_auto_scheduled(tmp_path):
+    from services.bailian_speech_client import BailianSpeechError
+
+    sink = _eligible_force_sink(tmp_path, "force-wait.db")
+    config = _external_config()
+    scope = dict(
+        minimum_duration_seconds=config.premium_min_duration_seconds,
+        score_threshold=config.premium_score_threshold,
+    )
+    fail_premium_guide(
+        sink.engine, "episode-force", BailianSpeechError("tts_receipt_disk_full"),
+    )
+    _set_episode_status(sink.engine, "episode-force", "synthesizing")
+    fail_premium_guide(
+        sink.engine, "episode-force", BailianSpeechError("tts_receipt_disk_full"),
+    )
+    assert _force_guide(sink)["retry_attempts"] == 2
+    assert premium_guide_auto_schedule_allowed(sink.engine, "episode-force") is False
+    assert "episode-force" not in pending_premium_guide_candidates(sink.engine, **scope)
+
+    first = prepare_forced_premium_guide(
+        sink.engine,
+        episode_id="episode-force",
+        config=config,
+        score_threshold=config.premium_score_threshold,
+        idempotency_key="force-during-wait",
+        reason="容量等待期间强制补一次",
+        actor="admin",
+    )
+    replay = prepare_forced_premium_guide(
+        sink.engine,
+        episode_id="episode-force",
+        config=config,
+        score_threshold=config.premium_score_threshold,
+        idempotency_key="force-during-wait",
+        reason="容量等待期间强制补一次",
+        actor="admin",
+    )
+    guide = _force_guide(sink)
+    assert first["should_schedule"] is True and first["replayed"] is False
+    assert replay["replayed"] is True and replay["status"] == "queued"
+    assert guide["status"] == "queued"
+    assert guide["retry_attempts"] == 2
+    assert "next_retry_at" not in guide
+    assert "error_code" not in guide
+    assert premium_guide_auto_schedule_allowed(sink.engine, "episode-force") is False
+    assert "episode-force" not in pending_premium_guide_candidates(sink.engine, **scope)
 
 
 def test_premium_guide_tasks_only_list_premium_episodes_and_paginate(tmp_path):

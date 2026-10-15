@@ -140,20 +140,37 @@ def receipt_cache_overview(config: BailianSpeechConfig, *, max_audio_bytes: int)
     }
 
 
-def _reclaim_completed_receipts_unlocked(
-    config: BailianSpeechConfig, engine, *, retention_days: int = 7,
-    now: dt.datetime | None = None,
-) -> dict:
-    """Compress verified old WAVs. Caller must already hold the receipt ``.lock``.
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
-    JSON provider receipts and database billing/idempotency records stay intact.
-    In-flight or ambiguous calls, recent WAVs, and episodes without a published
-    replacement remain untouched. Replay decompresses the archive by hash.
+
+def _reclaim_completed_receipts_unlocked(
+    config: BailianSpeechConfig, engine, *, retention_days: int | None = 7,
+    now: dt.datetime | None = None, drop_incompressible: bool = False,
+) -> dict:
+    """Free verified published WAVs. Caller must already hold the receipt ``.lock``.
+
+    JSON provider receipts and database billing rows stay. The row remains
+    ``succeeded``, so a later synthesize of the same narration does not POST
+    again. In-flight episodes and episodes without a published replacement
+    stay untouched.
+
+    The daily job keeps ``retention_days`` and only replaces a WAV with a
+    smaller zlib archive. A capacity shortfall passes ``retention_days=None``
+    and ``drop_incompressible=True``: age is ignored, and a hash-verified WAV
+    is deleted even when zlib does not shrink and even when the file is larger
+    than the cache limit (that file is what filled the cache).
     """
     root = Path(config.tts_receipt_root)
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    cutoff = (now or dt.datetime.now(dt.timezone.utc)) - dt.timedelta(days=retention_days)
+    current = now or dt.datetime.now(dt.timezone.utc)
+    cutoff = None if retention_days is None else current - dt.timedelta(days=retention_days)
     compressed = 0
+    removed = 0
     saved = 0
     with Session(engine) as session:
         published = set(session.exec(select(PodcastArtifactRecord.episode_id).where(
@@ -181,7 +198,7 @@ def _reclaim_completed_receipts_unlocked(
                 continue
             try:
                 created = dt.datetime.fromisoformat(row.created_at)
-                if created.tzinfo is None or created > cutoff:
+                if created.tzinfo is None or (cutoff is not None and created > cutoff):
                     continue
             except (TypeError, ValueError):
                 continue
@@ -190,24 +207,36 @@ def _reclaim_completed_receipts_unlocked(
             archive = root / f"{row.id}.wav.zlib"
             if not source.is_file() or not receipt.is_file() or archive.exists():
                 continue
-            if source.stat().st_size > config.tts_cache_max_bytes:
+            size = source.stat().st_size
+            # Compressing a file larger than the cache reads it into memory for
+            # no gain. Urgent reclaim still hash-checks and deletes it.
+            if size > config.tts_cache_max_bytes:
+                if not drop_incompressible or _file_sha256(source) != row.audio_hash:
+                    continue
+                source.unlink()
+                removed += 1
+                saved += size
                 continue
             data = source.read_bytes()
             if hashlib.sha256(data).hexdigest() != row.audio_hash:
                 continue
             packed = zlib.compress(data, level=6)
-            if len(packed) >= len(data):
-                continue
-            _atomic_write(archive, packed)
-            source.unlink()
-            compressed += 1
-            saved += len(data) - len(packed)
-    return {"compressed_wavs": compressed, "saved_bytes": saved}
+            if len(packed) < len(data):
+                _atomic_write(archive, packed)
+                source.unlink()
+                compressed += 1
+                saved += len(data) - len(packed)
+            elif drop_incompressible:
+                source.unlink()
+                removed += 1
+                saved += len(data)
+    return {"compressed_wavs": compressed, "removed_wavs": removed, "saved_bytes": saved}
 
 
 def reclaim_completed_receipts(
     config: BailianSpeechConfig, engine, *, retention_days: int = 7,
     now: dt.datetime | None = None, blocking: bool = True,
+    urgent: bool = False,
 ) -> dict:
     """Reclaim under the receipt lock.
 
@@ -215,6 +244,11 @@ def reclaim_completed_receipts(
     another worker already holds ``.lock``, skip instead of waiting. Callers
     that already hold that lock must use ``_reclaim_completed_receipts_unlocked``;
     locking it again on a second file descriptor deadlocks.
+
+    ``urgent=True`` is the capacity path: no age cutoff, and incompressible
+    verified WAVs are deleted. The daily job leaves both at the conservative
+    default so a compress-only pass cannot drop a WAV whose signed URL may
+    already have expired.
     """
     root = Path(config.tts_receipt_root)
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -223,9 +257,14 @@ def reclaim_completed_receipts(
         try:
             flock(lock, LOCK_EX if blocking else LOCK_EX | LOCK_NB)
         except BlockingIOError:
-            return {"compressed_wavs": 0, "saved_bytes": 0, "skipped": True}
+            return {
+                "compressed_wavs": 0, "removed_wavs": 0, "saved_bytes": 0, "skipped": True,
+            }
         return _reclaim_completed_receipts_unlocked(
-            config, engine, retention_days=retention_days, now=now,
+            config, engine,
+            retention_days=None if urgent else retention_days,
+            now=now,
+            drop_incompressible=urgent,
         )
 
 
@@ -300,6 +339,7 @@ class BailianPremiumGuideTtsProvider:
         if snapshot["cache_shortfall_bytes"] or snapshot["disk_shortfall_bytes"]:
             _reclaim_completed_receipts_unlocked(
                 self.config, self.engine, now=self.clock(),
+                retention_days=None, drop_incompressible=True,
             )
             snapshot = self.capacity_snapshot(characters)
         return snapshot
@@ -318,6 +358,7 @@ class BailianPremiumGuideTtsProvider:
         if not cache_ok or not disk_ok:
             _reclaim_completed_receipts_unlocked(
                 self.config, self.engine, now=self.clock(),
+                retention_days=None, drop_incompressible=True,
             )
             cache_ok, disk_ok = room()
         if not cache_ok:
@@ -406,6 +447,24 @@ class BailianPremiumGuideTtsProvider:
                 setattr(row, name, value)
             session.add(row)
             session.commit()
+
+    def _audio_from_receipt_url(self, receipt: Path, cfg, max_bytes: int) -> bytes:
+        """Rebuild one succeeded chunk from its saved provider URL. No POST."""
+
+        try:
+            payload = json.loads(receipt.read_text())
+        except (OSError, ValueError):
+            raise BailianSpeechError("tts_cached_audio_missing", unknown=True) from None
+        url = None
+        if isinstance(payload, dict):
+            output = payload.get("output")
+            audio = output.get("audio") if isinstance(output, dict) else None
+            if isinstance(audio, dict):
+                url = audio.get("url")
+        if not isinstance(url, str) or not url.strip():
+            raise BailianSpeechError("tts_cached_audio_missing", unknown=True)
+        data = asyncio.run(self.downloader(url, cfg, max_bytes=max_bytes))
+        return join_wav([data], self.max_audio_bytes)
 
     def _synthesize(self, narration):
         cfg = self.config
@@ -512,7 +571,15 @@ class BailianPremiumGuideTtsProvider:
                         if len(data) > self.max_audio_bytes or not decoder.eof or decoder.unused_data:
                             raise BailianSpeechError("tts_cached_audio_corrupt")
                     else:
-                        raise BailianSpeechError("tts_cached_audio_missing", unknown=True)
+                        # Urgent reclaim deletes a WAV that zlib cannot shrink.
+                        # The published artifact is the durable copy. Replay
+                        # fetches the receipt URL once, checks audio_hash, and
+                        # does not POST or rewrite the WAV (rewriting would
+                        # refill the cache just freed). An expired signed URL
+                        # fails closed with no second charge.
+                        data = self._audio_from_receipt_url(
+                            receipt, cfg, self.max_audio_bytes - sum(map(len, parts)),
+                        )
                     if hashlib.sha256(data).hexdigest() != row.audio_hash:
                         raise BailianSpeechError("tts_cached_audio_corrupt")
                     parts.append(data)
