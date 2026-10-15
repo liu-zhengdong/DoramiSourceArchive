@@ -66,7 +66,7 @@ STAGE_CODES = (
     "failed",
 )
 VERDICT_CODES = ("premium", "below_threshold", "unscored")
-TTS_FILTERS = ("not_started", "active", "ready", "failed")
+TTS_FILTERS = ("not_started", "active", "retry_wait", "ready", "failed")
 SORT_KEYS = ("publish", "score", "updated")
 TTS_STATUS_LABELS = {
     "not_started": "未开始",
@@ -314,7 +314,9 @@ def _verdict_code(state: _EpisodeState, *, threshold: float) -> str:
 
 def _tts_bucket(state: _EpisodeState) -> str:
     status, _ = _guide_status(state)
-    if status in ACTIVE_TTS_STATUSES or status == "retry_wait":
+    if status == "retry_wait":
+        return "retry_wait"
+    if status in ACTIVE_TTS_STATUSES:
         return "active"
     if status == "ready":
         return "ready"

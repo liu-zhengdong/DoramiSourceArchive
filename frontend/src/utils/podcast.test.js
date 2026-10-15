@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { podcastListAvailabilityMeta } from './podcast.js';
+import { podcastListAvailabilityMeta, podcastProcessingMeta } from './podcast.js';
 
 test('podcast list availability never exposes background processing state', () => {
   assert.deepEqual(podcastListAvailabilityMeta(false), {
@@ -14,14 +14,49 @@ test('podcast list availability never exposes background processing state', () =
   });
 });
 
-test('list labels separate text, running synthesis, failed audio and playable audio', () => {
+test('readable text without audio uses one neutral label', () => {
   const guide = { blog_ready: true, status: 'failed' };
-  assert.deepEqual(podcastListAvailabilityMeta({ premium_guide: guide }), {
-    label: '导读文字已生成，音频失败', tone: 'bad',
-  });
-  assert.equal(podcastListAvailabilityMeta({ premium_guide: { ...guide, status: 'synthesizing' } }).tone, 'run');
-  assert.equal(podcastListAvailabilityMeta({ premium_guide: { ...guide, status: '' } }).label, '导读文字已生成，音频待生成');
-  assert.equal(podcastListAvailabilityMeta({ condensed_audio_url: '/audio', premium_guide: guide }).label, '精品导读音频已就绪');
+  for (const status of ['queued', 'synthesizing', 'retry_wait', 'failed', '']) {
+    assert.deepEqual(
+      podcastListAvailabilityMeta({ premium_guide: { ...guide, status } }),
+      { label: '中文导读可阅读', tone: 'idle' },
+      status,
+    );
+  }
+  assert.equal(
+    podcastListAvailabilityMeta({ condensed_audio_url: '/audio', premium_guide: guide }).label,
+    '精品导读音频已就绪',
+  );
+});
+
+test('no guide text distinguishes generating from a quiet original-only row', () => {
+  for (const status of ['queued', 'summarizing', 'synthesizing']) {
+    assert.deepEqual(
+      podcastListAvailabilityMeta({ premium_guide: { blog_ready: false, status } }),
+      { label: '精品导读生成中…', tone: 'run' },
+      status,
+    );
+  }
+  for (const status of ['failed', 'retry_wait', '']) {
+    assert.deepEqual(
+      podcastListAvailabilityMeta({ premium_guide: { status } }),
+      { label: '仅提供原节目', tone: 'idle' },
+      status,
+    );
+  }
+});
+
+test('reader labels never say failure', () => {
+  const samples = [
+    podcastProcessingMeta('failed'),
+    podcastProcessingMeta('error'),
+    podcastProcessingMeta('retry_wait'),
+    podcastListAvailabilityMeta({ premium_guide: { blog_ready: true, status: 'failed' } }),
+    podcastListAvailabilityMeta({ premium_guide: { status: 'failed' } }),
+    podcastListAvailabilityMeta({ premium_guide: { status: 'retry_wait' } }),
+  ];
+  for (const meta of samples) assert.equal(meta.label.includes('失败'), false);
+  assert.deepEqual(podcastProcessingMeta('failed'), { label: '仅提供原节目', tone: 'idle' });
 });
 
 test('non-Chinese text-only guide never promises pending audio', () => {
