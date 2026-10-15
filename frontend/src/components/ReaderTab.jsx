@@ -767,7 +767,9 @@ export default function ReaderTab({
           </button>
         )}
 
-        {!rankingsOpen && <div className="reader-source-scroll">
+        {/* 榜单打开时源列表保持在场。点源、标签或「发现更多来源」会先关掉榜单再进入，
+            与视图轨文章/播客/发现按钮同一套 setRankingsOpen(false)。 */}
+        <div className="reader-source-scroll">
           {sourcesLoading ? (
             <SourceRowsSkeleton />
           ) : (
@@ -788,7 +790,7 @@ export default function ReaderTab({
                 <TagRows
                   groups={interestGroups}
                   activeTagId={activeTagId}
-                  onPick={(id) => { leaveBriefTrail(); goTag(id); }}
+                  onPick={(id) => { setRankingsOpen(false); leaveBriefTrail(); goTag(id); }}
                   hasInterests={hasInterests}
                   onOpenInterests={openInterests}
                 />
@@ -810,8 +812,8 @@ export default function ReaderTab({
                         key={source.source_id}
                         role="button"
                         tabIndex={0}
-                        onClick={() => { leaveBriefTrail(); goSource(source.source_id); }}
-                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); leaveBriefTrail(); goSource(source.source_id); } }}
+                        onClick={() => { setRankingsOpen(false); leaveBriefTrail(); goSource(source.source_id); }}
+                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setRankingsOpen(false); leaveBriefTrail(); goSource(source.source_id); } }}
                         onContextMenu={(e) => onRowContextMenu(e, source, 'source')}
                         className={`reader-source-row ${active ? 'reader-source-row-active' : ''} ${unread > 0 ? 'has-unread' : ''} ${source.hidden ? 'is-unavailable' : ''} ${ctxMenu?.anchorKey === `source:${source.source_id}` ? 'is-ctx-anchor' : ''}`}
                       >
@@ -853,7 +855,7 @@ export default function ReaderTab({
               {showSourceRows && !hasNoSubscriptions && (
                 <button
                   type="button"
-                  onClick={openDiscoverSources}
+                  onClick={() => { setRankingsOpen(false); openDiscoverSources(); }}
                   className="reader-src-more"
                 >
                   <Compass className="h-3.5 w-3.5" />
@@ -862,7 +864,7 @@ export default function ReaderTab({
               )}
             </>
           )}
-        </div>}
+        </div>
         </div>
       </aside>}
 
