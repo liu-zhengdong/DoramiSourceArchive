@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import inspect
+import io
 import json
 import subprocess
 import asyncio
+import wave
 
 import pytest
 from sqlmodel import Session, select
@@ -128,6 +131,10 @@ def test_tts_retry_reuses_valid_published_text_without_llm_regeneration(tmp_path
     with pytest.raises(RuntimeError, match="capacity blocked"):
         asyncio.run(run_premium_guide(**kwargs, tts_provider=FailingTts()))
     with Session(sink.engine) as session:
+        guide = json.loads(session.get(ArticleRecord, "episode-force").extensions_json)["premium_guide"]
+        assert guide["status"] == "failed"
+        assert "next_retry_at" not in guide
+    with Session(sink.engine) as session:
         script = session.get(PodcastTextPublicationRecord, "episode-force:narration_script_zh").artifact_id
     result = asyncio.run(run_premium_guide(**kwargs, tts_provider=TtsProvider()))
     assert result["audio_artifact_id"]
@@ -208,9 +215,193 @@ def test_tts_cache_preflight_blocks_before_text_generation(tmp_path):
         ))
     with Session(sink.engine) as session:
         guide = json.loads(session.get(ArticleRecord, "episode-force").extensions_json)["premium_guide"]
+        assert guide["status"] == "retry_wait"
+        assert guide["error_code"] == "tts_receipt_cache_full"
+        assert guide["next_retry_at"]
         assert guide["failed_stage"] == "synthesizing"
         assert "回执缓存不足" in guide["error"]
         assert session.get(PodcastTextPublicationRecord, "episode-force:digest_blog_zh") is None
+
+
+def _pcm_wav() -> bytes:
+    out = io.BytesIO()
+    with wave.open(out, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(24000)
+        handle.writeframes(b"\x00\x00" * 2400)
+    return out.getvalue()
+
+
+@pytest.mark.parametrize("code", ["tts_receipt_cache_full", "tts_receipt_disk_full", "http_403"])
+def test_only_capacity_errors_enter_retry_wait(tmp_path, code):
+    from services.bailian_speech_client import BailianSpeechError
+
+    sink = DatabaseStorage(f"sqlite:///{tmp_path / f'status-{code}.db'}")
+    _seed_force_candidate(sink, duration=21 * 60)
+    with Session(sink.engine) as session:
+        analysis = session.get(ArticleAnalysisRecord, "episode-force")
+        analysis.quality_score = 9.0
+        analysis.podcast_final_score = 9.0
+        session.add(analysis)
+        session.commit()
+
+    class Boom(TtsProvider):
+        async def synthesize(self, _text):
+            raise BailianSpeechError(code)
+
+    with pytest.raises(BailianSpeechError, match=code):
+        asyncio.run(run_premium_guide(
+            sink.engine, None, episode_id="episode-force", config=_external_config(),
+            text_provider=TextProvider(), tts_provider=Boom(),
+        ))
+    with Session(sink.engine) as session:
+        guide = json.loads(session.get(ArticleRecord, "episode-force").extensions_json)["premium_guide"]
+        blog = session.get(PodcastTextPublicationRecord, "episode-force:digest_blog_zh")
+        script = session.get(PodcastTextPublicationRecord, "episode-force:narration_script_zh")
+    assert blog is not None and script is not None
+    minimum = _external_config().premium_min_duration_seconds
+    threshold = _external_config().premium_score_threshold
+    if code == "http_403":
+        assert guide["status"] == "failed"
+        assert "next_retry_at" not in guide
+        assert "episode-force" not in pending_premium_guide_candidates(
+            sink.engine, minimum_duration_seconds=minimum, score_threshold=threshold,
+        )
+    else:
+        assert guide["status"] == "retry_wait"
+        assert guide["error_code"] == code
+        assert "episode-force" not in pending_premium_guide_candidates(
+            sink.engine, minimum_duration_seconds=minimum, score_threshold=threshold,
+        )
+
+
+def test_capacity_wait_retries_tts_without_another_supplier_or_llm_call(tmp_path):
+    from config import settings
+    from config_bailian import BailianSpeechConfig
+    from models.db import BailianTtsCallRecord
+    from services.bailian_speech_client import BailianSpeechError
+    from services.bailian_tts import BailianPremiumGuideTtsProvider, split_narration
+
+    sink = DatabaseStorage(f"sqlite:///{tmp_path / 'capacity-retry.db'}")
+    _seed_force_candidate(sink, duration=21 * 60)
+    with Session(sink.engine) as session:
+        analysis = session.get(ArticleAnalysisRecord, "episode-force")
+        analysis.quality_score = 9.0
+        analysis.podcast_final_score = 9.0
+        session.add(analysis)
+        session.commit()
+    narration = "这是内部中文播客导读。"
+    assert len(split_narration(narration, 8)) == 2
+    root = tmp_path / "receipts"
+    cfg = BailianSpeechConfig(
+        enabled=True, api_key="secret-test", account_scope="test-account",
+        tts_monthly_budget_minor=100, tts_per_run_budget_minor=50,
+        tts_chunk_chars=8, tts_receipt_root=str(root), tts_cache_max_bytes=40_000_000,
+        asr_entitlement_ends_at="2027-01-01T00:00:00+00:00",
+    )
+    poisoned = {"done": False}
+
+    class Supplier:
+        texts: list[str] = []
+
+        def __init__(self, _config):
+            pass
+
+        def close(self):
+            pass
+
+        def synthesize(self, text):
+            Supplier.texts.append(text)
+            return {
+                "request_id": "req-" + str(len(Supplier.texts)),
+                "usage": {"characters": len(text)},
+                "output": {"audio": {"url": "https://result.oss-ap-southeast-1.aliyuncs.com/a.wav"}},
+            }
+
+    async def download(*_args, **_kwargs):
+        if len(Supplier.texts) >= 2 and not poisoned["done"]:
+            poisoned["done"] = True
+            (root / "blocker").write_bytes(b"x" * cfg.tts_cache_max_bytes)
+        return _pcm_wav()
+
+    class CountingText(TextProvider):
+        blogs = 0
+        scripts = 0
+
+        async def create_blog(self, **kwargs):
+            self.blogs += 1
+            return await super().create_blog(**kwargs)
+
+        async def create_narration(self, **_kwargs):
+            self.scripts += 1
+            return narration
+
+    store = PodcastArtifactStore(
+        sink.engine, tmp_path / "audio", max_bytes=1024 * 1024,
+        total_quota_bytes=10 * 1024 * 1024, minimum_free_bytes=0,
+        staging_ttl_seconds=60, allowed_mime_types=("audio/wav",),
+        probe_runner=lambda *_a, **_k: subprocess.CompletedProcess(
+            [], 0, stdout='{"streams":[{"codec_type":"audio","duration":"1"}],"format":{"duration":"1"}}', stderr="",
+        ),
+    )
+    text = CountingText()
+    tts = BailianPremiumGuideTtsProvider(
+        cfg, engine=sink.engine, episode_id="episode-force", voice_profile="narrator_zh",
+        max_audio_bytes=store.max_bytes, client_factory=Supplier, downloader=download,
+    )
+    config = _external_config()
+    kwargs = dict(
+        engine=sink.engine, store=store, episode_id="episode-force", config=config,
+        text_provider=text, tts_provider=tts,
+    )
+    assert pending_premium_guide_candidates(
+        sink.engine, minimum_duration_seconds=config.premium_min_duration_seconds,
+        score_threshold=config.premium_score_threshold,
+    ) == ["episode-force"]
+    with pytest.raises(BailianSpeechError, match="tts_receipt_cache_full"):
+        asyncio.run(run_premium_guide(**kwargs))
+    assert (text.blogs, text.scripts) == (1, 1)
+    assert len(Supplier.texts) == 2
+    assert (root / "blocker").is_file()
+    with Session(sink.engine) as session:
+        guide = json.loads(session.get(ArticleRecord, "episode-force").extensions_json)["premium_guide"]
+        first_ids = {
+            row.id: row.request_id
+            for row in session.exec(select(BailianTtsCallRecord)).all()
+        }
+    assert guide["status"] == "retry_wait"
+    assert guide["error_code"] == "tts_receipt_cache_full"
+    retry_at = dt.datetime.fromisoformat(guide["next_retry_at"])
+    delay = settings.podcast_worker.fallback_retry_seconds
+    remaining = retry_at - dt.datetime.now(dt.timezone.utc)
+    assert dt.timedelta(seconds=delay - 15) <= remaining <= dt.timedelta(seconds=delay + 5)
+    assert "episode-force" not in pending_premium_guide_candidates(
+        sink.engine, minimum_duration_seconds=config.premium_min_duration_seconds,
+        score_threshold=config.premium_score_threshold,
+    )
+    with Session(sink.engine) as session:
+        episode = session.get(ArticleRecord, "episode-force")
+        extensions = json.loads(episode.extensions_json)
+        extensions["premium_guide"]["next_retry_at"] = "2020-01-01T00:00:00+00:00"
+        episode.extensions_json = json.dumps(extensions)
+        session.add(episode)
+        session.commit()
+    assert pending_premium_guide_candidates(
+        sink.engine, minimum_duration_seconds=config.premium_min_duration_seconds,
+        score_threshold=config.premium_score_threshold,
+    ) == ["episode-force"]
+    (root / "blocker").unlink()
+    result = asyncio.run(run_premium_guide(**kwargs))
+    assert result["audio_artifact_id"]
+    assert (text.blogs, text.scripts) == (1, 1)
+    assert len(Supplier.texts) == 2
+    with Session(sink.engine) as session:
+        guide = json.loads(session.get(ArticleRecord, "episode-force").extensions_json)["premium_guide"]
+        rows = session.exec(select(BailianTtsCallRecord)).all()
+        assert guide["status"] == "ready"
+        assert {row.id: row.request_id for row in rows} == first_ids
+        assert {row.status for row in rows} == {"succeeded"}
 
 
 def test_premium_guide_tasks_only_list_premium_episodes_and_paginate(tmp_path):

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
-from services.file_lock import LOCK_EX, flock
+from services.file_lock import LOCK_EX, LOCK_NB, flock
 import hashlib
 import io
 import json
@@ -140,11 +140,11 @@ def receipt_cache_overview(config: BailianSpeechConfig, *, max_audio_bytes: int)
     }
 
 
-def reclaim_completed_receipts(
+def _reclaim_completed_receipts_unlocked(
     config: BailianSpeechConfig, engine, *, retention_days: int = 7,
     now: dt.datetime | None = None,
 ) -> dict:
-    """Compress verified old WAVs only after published audio exists.
+    """Compress verified old WAVs. Caller must already hold the receipt ``.lock``.
 
     JSON provider receipts and database billing/idempotency records stay intact.
     In-flight or ambiguous calls, recent WAVs, and episodes without a published
@@ -155,57 +155,78 @@ def reclaim_completed_receipts(
     cutoff = (now or dt.datetime.now(dt.timezone.utc)) - dt.timedelta(days=retention_days)
     compressed = 0
     saved = 0
+    with Session(engine) as session:
+        published = set(session.exec(select(PodcastArtifactRecord.episode_id).where(
+            PodcastArtifactRecord.kind == "digest_audio_zh",
+            PodcastArtifactRecord.status == "published",
+        )).all())
+        for article in session.exec(select(ArticleRecord)).all():
+            try:
+                extensions = json.loads(article.extensions_json or "{}")
+            except (TypeError, ValueError):
+                continue
+            guide = extensions.get("listen_guide") if isinstance(extensions, dict) else None
+            if not isinstance(guide, dict) or guide.get("status") != "ready":
+                continue
+            content_hash = str(guide.get("content_hash") or "").strip().lower()
+            mime = str(guide.get("mime") or "").strip().lower()
+            if re.fullmatch(r"[0-9a-f]{64}", content_hash) and mime:
+                published.add(article.id)
+        rows = session.exec(select(BailianTtsCallRecord).where(
+            BailianTtsCallRecord.account_scope == config.account_scope,
+        )).all()
+        in_flight = {row.episode_id for row in rows if row.status in {"reserved", "authorized", "generated"}}
+        for row in rows:
+            if row.status != "succeeded" or row.episode_id not in published or row.episode_id in in_flight:
+                continue
+            try:
+                created = dt.datetime.fromisoformat(row.created_at)
+                if created.tzinfo is None or created > cutoff:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            source = root / f"{row.id}.wav"
+            receipt = root / f"{row.id}.json"
+            archive = root / f"{row.id}.wav.zlib"
+            if not source.is_file() or not receipt.is_file() or archive.exists():
+                continue
+            if source.stat().st_size > config.tts_cache_max_bytes:
+                continue
+            data = source.read_bytes()
+            if hashlib.sha256(data).hexdigest() != row.audio_hash:
+                continue
+            packed = zlib.compress(data, level=6)
+            if len(packed) >= len(data):
+                continue
+            _atomic_write(archive, packed)
+            source.unlink()
+            compressed += 1
+            saved += len(data) - len(packed)
+    return {"compressed_wavs": compressed, "saved_bytes": saved}
+
+
+def reclaim_completed_receipts(
+    config: BailianSpeechConfig, engine, *, retention_days: int = 7,
+    now: dt.datetime | None = None, blocking: bool = True,
+) -> dict:
+    """Reclaim under the receipt lock.
+
+    ``blocking=False`` is the multi-worker maintenance path: if synthesis or
+    another worker already holds ``.lock``, skip instead of waiting. Callers
+    that already hold that lock must use ``_reclaim_completed_receipts_unlocked``;
+    locking it again on a second file descriptor deadlocks.
+    """
+    root = Path(config.tts_receipt_root)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(root / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
     with os.fdopen(fd, "wb") as lock:
-        flock(lock, LOCK_EX)
-        with Session(engine) as session:
-            published = set(session.exec(select(PodcastArtifactRecord.episode_id).where(
-                PodcastArtifactRecord.kind == "digest_audio_zh",
-                PodcastArtifactRecord.status == "published",
-            )).all())
-            for article in session.exec(select(ArticleRecord)).all():
-                try:
-                    extensions = json.loads(article.extensions_json or "{}")
-                except (TypeError, ValueError):
-                    continue
-                guide = extensions.get("listen_guide") if isinstance(extensions, dict) else None
-                if not isinstance(guide, dict) or guide.get("status") != "ready":
-                    continue
-                content_hash = str(guide.get("content_hash") or "").strip().lower()
-                mime = str(guide.get("mime") or "").strip().lower()
-                if re.fullmatch(r"[0-9a-f]{64}", content_hash) and mime:
-                    published.add(article.id)
-            rows = session.exec(select(BailianTtsCallRecord).where(
-                BailianTtsCallRecord.account_scope == config.account_scope,
-            )).all()
-            in_flight = {row.episode_id for row in rows if row.status in {"reserved", "authorized", "generated"}}
-            for row in rows:
-                if row.status != "succeeded" or row.episode_id not in published or row.episode_id in in_flight:
-                    continue
-                try:
-                    created = dt.datetime.fromisoformat(row.created_at)
-                    if created.tzinfo is None or created > cutoff:
-                        continue
-                except (TypeError, ValueError):
-                    continue
-                source = root / f"{row.id}.wav"
-                receipt = root / f"{row.id}.json"
-                archive = root / f"{row.id}.wav.zlib"
-                if not source.is_file() or not receipt.is_file() or archive.exists():
-                    continue
-                if source.stat().st_size > config.tts_cache_max_bytes:
-                    continue
-                data = source.read_bytes()
-                if hashlib.sha256(data).hexdigest() != row.audio_hash:
-                    continue
-                packed = zlib.compress(data, level=6)
-                if len(packed) >= len(data):
-                    continue
-                _atomic_write(archive, packed)
-                source.unlink()
-                compressed += 1
-                saved += len(data) - len(packed)
-    return {"compressed_wavs": compressed, "saved_bytes": saved}
+        try:
+            flock(lock, LOCK_EX if blocking else LOCK_EX | LOCK_NB)
+        except BlockingIOError:
+            return {"compressed_wavs": 0, "saved_bytes": 0, "skipped": True}
+        return _reclaim_completed_receipts_unlocked(
+            config, engine, retention_days=retention_days, now=now,
+        )
 
 
 class BailianPremiumGuideTtsProvider:
@@ -254,12 +275,55 @@ class BailianPremiumGuideTtsProvider:
         }
 
     def ensure_capacity(self, characters: int) -> dict:
-        snapshot = self.capacity_snapshot(characters)
+        """Take the receipt lock, reclaim once if short, then recheck.
+
+        Do not call this while the same ``.lock`` is already held. Synthesis
+        uses ``_ensure_capacity_locked`` instead.
+        """
+        root = Path(self.config.tts_receipt_root)
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(root / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "wb") as lock:
+            flock(lock, LOCK_EX)
+            return self._ensure_capacity_locked(characters)
+
+    def _ensure_capacity_locked(self, characters: int) -> dict:
+        snapshot = self._capacity_after_one_reclaim(characters)
         if snapshot["cache_shortfall_bytes"]:
             raise BailianSpeechError("tts_receipt_cache_full")
         if snapshot["disk_shortfall_bytes"]:
             raise BailianSpeechError("tts_receipt_disk_full")
         return snapshot
+
+    def _capacity_after_one_reclaim(self, characters: int) -> dict:
+        snapshot = self.capacity_snapshot(characters)
+        if snapshot["cache_shortfall_bytes"] or snapshot["disk_shortfall_bytes"]:
+            _reclaim_completed_receipts_unlocked(
+                self.config, self.engine, now=self.clock(),
+            )
+            snapshot = self.capacity_snapshot(characters)
+        return snapshot
+
+    def _require_bytes_locked(self, nbytes: int) -> None:
+        """Post-download guard. One reclaim, then the same cache/disk checks."""
+
+        def room() -> tuple[bool, bool]:
+            snapshot = self.capacity_snapshot(0)
+            return (
+                snapshot["used_bytes"] + nbytes <= self.config.tts_cache_max_bytes,
+                snapshot["disk_free_bytes"] >= nbytes + 1024**3,
+            )
+
+        cache_ok, disk_ok = room()
+        if not cache_ok or not disk_ok:
+            _reclaim_completed_receipts_unlocked(
+                self.config, self.engine, now=self.clock(),
+            )
+            cache_ok, disk_ok = room()
+        if not cache_ok:
+            raise BailianSpeechError("tts_receipt_cache_full")
+        if not disk_ok:
+            raise BailianSpeechError("tts_receipt_disk_full")
 
     def _reserve(self, chunks, keys, now):
         cfg = self.config
@@ -377,7 +441,7 @@ class BailianPremiumGuideTtsProvider:
                 needs_storage_chars = sum(len(chunk) for chunk, key in zip(chunks, keys)
                     if (row := session.get(BailianTtsCallRecord, key)) is None or row.status != "succeeded")
             if needs_storage_chars:
-                self.ensure_capacity(needs_storage_chars)
+                self._ensure_capacity_locked(needs_storage_chars)
             self._reserve(chunks, keys, self.clock())
             parts = []
             client = self.client_factory(cfg)
@@ -426,11 +490,7 @@ class BailianPremiumGuideTtsProvider:
                             )
                         )
                         data = join_wav([data], self.max_audio_bytes)
-                        snapshot = self.capacity_snapshot(0)
-                        if snapshot["used_bytes"] + len(data) > cfg.tts_cache_max_bytes:
-                            raise BailianSpeechError("tts_receipt_cache_full")
-                        if snapshot["disk_free_bytes"] < len(data) + 1024**3:
-                            raise BailianSpeechError("tts_receipt_disk_full")
+                        self._require_bytes_locked(len(data))
                         _atomic_write(audio_path, data)
                         self._update(
                             key,

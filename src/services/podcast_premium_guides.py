@@ -21,7 +21,7 @@ from sqlalchemy import case, func, or_
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
-from config import PodcastConfig
+from config import PodcastConfig, settings
 from models.db import (
     ArticleAnalysisRecord,
     ArticleRecord,
@@ -192,6 +192,28 @@ def _now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="microseconds")
 
 
+# Capacity shortages are recoverable. The wait uses the same fallback delay as
+# podcast processing ``retry_wait`` (``podcast_worker.fallback_retry_seconds``).
+CAPACITY_RETRY_CODES = {
+    "tts_receipt_cache_full": "TTS 回执缓存不足，请在播客管理台检查缺口并安全归档已完成回执",
+    "tts_receipt_disk_full": "TTS 回执所在磁盘空间不足，请在播客管理台检查磁盘缺口",
+}
+
+
+def _premium_guide_retry_due(guide: dict, *, now: dt.datetime | None = None) -> bool:
+    raw = str(guide.get("next_retry_at") or "").strip()
+    if not raw:
+        return False
+    try:
+        retry_at = dt.datetime.fromisoformat(raw)
+    except ValueError:
+        return False
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=dt.timezone.utc)
+    current = now or dt.datetime.now(dt.timezone.utc)
+    return retry_at <= current
+
+
 def _extensions(article: ArticleRecord) -> dict:
     try:
         value = json.loads(article.extensions_json or "{}")
@@ -338,6 +360,8 @@ def _set_episode_status(
     failed_stage: str = "",
     audio: PodcastArtifactRecord | None = None,
     guide_metadata: dict[str, Any] | None = None,
+    next_retry_at: str = "",
+    error_code: str = "",
 ) -> None:
     with Session(engine) as session:
         episode = session.get(ArticleRecord, episode_id)
@@ -355,7 +379,7 @@ def _set_episode_status(
                 key: value for key, value in guide_metadata.items()
                 if value not in (None, "")
             })
-        if status == "failed":
+        if status in {"failed", "retry_wait"}:
             effective_failed_stage = (
                 str(failed_stage or "").strip()
                 or (
@@ -368,6 +392,13 @@ def _set_episode_status(
                 guide["failed_stage"] = effective_failed_stage
         else:
             guide.pop("failed_stage", None)
+        if status == "retry_wait" and next_retry_at:
+            guide["next_retry_at"] = next_retry_at
+            if error_code:
+                guide["error_code"] = error_code[:120]
+        else:
+            guide.pop("next_retry_at", None)
+            guide.pop("error_code", None)
         if error:
             guide["error"] = error[:300]
         else:
@@ -391,14 +422,25 @@ def fail_premium_guide(
     *,
     failed_stage: str = "",
 ) -> None:
-    """Persist a terminal guide error so admin polling never loses failures."""
+    """Persist a guide error. Capacity shortages wait; every other error is terminal."""
 
+    code = error.code if isinstance(error, BailianSpeechError) else ""
+    if code in CAPACITY_RETRY_CODES:
+        delay = settings.podcast_worker.fallback_retry_seconds
+        retry_at = (
+            dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=delay)
+        ).isoformat(timespec="microseconds")
+        _set_episode_status(
+            engine,
+            episode_id,
+            "retry_wait",
+            error=CAPACITY_RETRY_CODES[code],
+            failed_stage=failed_stage,
+            next_retry_at=retry_at,
+            error_code=code,
+        )
+        return
     message = str(error).strip() or type(error).__name__
-    if isinstance(error, BailianSpeechError):
-        message = {
-            "tts_receipt_cache_full": "TTS 回执缓存不足，请在播客管理台检查缺口并安全归档已完成回执",
-            "tts_receipt_disk_full": "TTS 回执所在磁盘空间不足，请在播客管理台检查磁盘缺口",
-        }.get(error.code, message)
     _set_episode_status(
         engine,
         episode_id,
@@ -1043,7 +1085,7 @@ def evaluate_reader_ondemand_premium_guide(
                 "charged": False,
                 "should_schedule": False,
             }
-        if status in {"queued", "summarizing", "synthesizing"}:
+        if status in {"queued", "summarizing", "synthesizing", "retry_wait"}:
             return {
                 "episode_id": episode_id,
                 "status": status,
@@ -1449,7 +1491,12 @@ def pending_premium_guide_candidates(
             guide = guide if isinstance(guide, dict) else {}
             status = str(guide.get("status") or extensions.get("processing_status") or "")
             current_mode = str(guide.get("mode") or "")
-            if status in {"summarizing", "synthesizing", "failed"}:
+            # Due capacity waits re-enter this scan. A future next_retry_at stays
+            # out, and terminal failures stay out.
+            if status == "retry_wait":
+                if not _premium_guide_retry_due(guide):
+                    continue
+            elif status in {"summarizing", "synthesizing", "failed"}:
                 continue
             if status == "ready" and current_mode == eligibility.mode:
                 publication = session.get(
