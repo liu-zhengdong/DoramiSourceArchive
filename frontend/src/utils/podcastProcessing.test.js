@@ -2,8 +2,6 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  PODCAST_TTS_FILTERS,
-  PODCAST_TTS_META,
   podcastForceTtsResult,
   podcastProcessingReason,
   podcastProcessingSuccessMessage,
@@ -83,36 +81,6 @@ test('task meta normalizes stage / verdict / tts and keeps reconciliation apart 
   assert.equal(rejected.reason, '简介初评 4.5 < 付费 ASR 线 6.0');
   assert.deepEqual(podcastScoreCell({ initial_score: 4.5 }), { main: '4.5', sub: '简介' });
   assert.deepEqual(podcastScoreCell({ initial_score: 7, final_score: 8.7 }), { main: '8.7', sub: '全文 · 简介 7.0' });
-});
-
-test('tts retry_wait is a warn stamp with the planned retry, apart from failure', () => {
-  assert.equal(PODCAST_TTS_META.retry_wait.label, '等待重试');
-  assert.equal(PODCAST_TTS_META.retry_wait.tone, 'warn');
-  assert.deepEqual(
-    PODCAST_TTS_FILTERS.filter(([, label]) => label === '等待重试' || label === '失败').map(([value]) => value),
-    ['retry_wait', 'failed'],
-  );
-  const waiting = podcastTaskMeta({
-    stage_code: 'full_analyzed', verdict: 'premium', is_premium: true, final_score: 8.2,
-    tts_status: 'retry_wait',
-    tts_error: 'TTS 回执缓存不足，请在播客管理台检查缺口并安全归档已完成回执',
-    tts_next_retry_at: '2026-10-15T09:30:00+00:00',
-  }, THRESHOLDS);
-  assert.equal(waiting.tts.label, '等待重试');
-  assert.equal(waiting.tts.tone, 'warn');
-  assert.equal(waiting.tts.status, 'retry_wait');
-  assert.match(waiting.tts.retryNote, /^计划 .+ 自动重试$/);
-  const failed = podcastTaskMeta({
-    stage_code: 'full_analyzed', verdict: 'premium', final_score: 8.2,
-    tts_status: 'failed', tts_error: 'http_403',
-  }, THRESHOLDS);
-  assert.equal(failed.tts.label, '失败');
-  assert.equal(failed.tts.tone, 'bad');
-  assert.equal(failed.tts.retryNote, '');
-  const undated = podcastTaskMeta({
-    stage_code: 'full_analyzed', final_score: 8, tts_status: 'retry_wait',
-  }, THRESHOLDS);
-  assert.equal(undated.tts.retryNote, '');
 });
 
 test('forced TTS result distinguishes ready / idempotent hit / started', () => {

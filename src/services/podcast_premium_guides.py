@@ -243,11 +243,13 @@ def _capacity_wait_already_recorded(guide: dict, code: str) -> bool:
 
 
 def premium_guide_auto_schedule_allowed(engine: Engine, episode_id: str) -> bool:
-    """Whether the worker may start this episode right now.
+    """Whether an automatic or manual run may start this episode right now.
 
-    A force command owns ``queued`` (it already scheduled once and cleared
-    ``next_retry_at``). A capacity wait starts only after ``next_retry_at``.
-    A candidate list captured before that change must not start a second run.
+    Two states stay held: ``queued`` is already a force command, and a
+    capacity ``retry_wait`` waits until ``next_retry_at``. ``failed``,
+    ``ready``, ``not_required`` and a due wait keep the previous behavior,
+    including a manual ``POST .../run`` and a ready guide whose mode or
+    language changed.
     """
 
     with Session(engine) as session:
@@ -258,11 +260,11 @@ def premium_guide_auto_schedule_allowed(engine: Engine, episode_id: str) -> bool
     if not isinstance(guide, dict):
         return True
     status = str(guide.get("status") or "")
-    if status in {"", "not_started"}:
-        return True
-    if status == "retry_wait":
-        return _premium_guide_retry_due(guide)
-    return False
+    if status == "queued":
+        return False
+    if status == "retry_wait" and not _premium_guide_retry_due(guide):
+        return False
+    return True
 
 
 def _premium_guide_retry_due(guide: dict, *, now: dt.datetime | None = None) -> bool:

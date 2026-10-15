@@ -527,6 +527,69 @@ def test_force_during_retry_wait_clears_the_timer_and_is_not_auto_scheduled(tmp_
     assert "episode-force" not in pending_premium_guide_candidates(sink.engine, **scope)
 
 
+def test_schedule_gate_lets_failed_and_mode_change_start(tmp_path, monkeypatch):
+    """Manual run and a ready guide with a new mode still start.
+
+    Only a future capacity wait and a force-owned queue stay blocked.
+    """
+
+    from types import SimpleNamespace
+
+    import api.app as app_module
+
+    sink = _eligible_force_sink(tmp_path, "schedule-gate.db")
+    config = _external_config()
+    scope = dict(
+        minimum_duration_seconds=config.premium_min_duration_seconds,
+        score_threshold=config.premium_score_threshold,
+    )
+    monkeypatch.setattr(app_module, "db_sink", SimpleNamespace(engine=sink.engine))
+
+    def start(episode_id: str) -> bool:
+        async def once() -> bool:
+            started = app_module.schedule_podcast_premium_guide(episode_id)
+            task = app_module._PODCAST_PREMIUM_GUIDE_TASKS.pop(episode_id, None)
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            return started
+
+        return asyncio.run(once())
+
+    _set_episode_status(sink.engine, "episode-force", "failed", error="earlier failure")
+    assert premium_guide_auto_schedule_allowed(sink.engine, "episode-force") is True
+    assert start("episode-force") is True
+
+    _set_episode_status(sink.engine, "episode-force", "not_required")
+    assert premium_guide_auto_schedule_allowed(sink.engine, "episode-force") is True
+    assert start("episode-force") is True
+
+    _set_episode_status(
+        sink.engine, "episode-force", "ready",
+        guide_metadata={"mode": "brief_zh", "language": "en"},
+    )
+    assert pending_premium_guide_candidates(sink.engine, **scope) == ["episode-force"]
+    assert premium_guide_auto_schedule_allowed(sink.engine, "episode-force") is True
+    assert start("episode-force") is True
+
+    future = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)).isoformat()
+    _set_episode_status(
+        sink.engine, "episode-force", "retry_wait",
+        error="TTS 回执缓存不足", next_retry_at=future, error_code="tts_receipt_cache_full",
+    )
+    assert premium_guide_auto_schedule_allowed(sink.engine, "episode-force") is False
+    assert "episode-force" not in pending_premium_guide_candidates(sink.engine, **scope)
+    assert start("episode-force") is False
+
+    _set_episode_status(sink.engine, "episode-force", "queued")
+    assert premium_guide_auto_schedule_allowed(sink.engine, "episode-force") is False
+    assert "episode-force" not in pending_premium_guide_candidates(sink.engine, **scope)
+    assert start("episode-force") is False
+
+
 def test_premium_guide_tasks_only_list_premium_episodes_and_paginate(tmp_path):
     sink = DatabaseStorage(f"sqlite:///{tmp_path / 'premium-list.db'}")
     with Session(sink.engine) as session:

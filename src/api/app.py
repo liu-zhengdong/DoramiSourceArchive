@@ -784,8 +784,9 @@ def schedule_podcast_premium_guide(episode_id: str) -> bool:
     existing = _PODCAST_PREMIUM_GUIDE_TASKS.get(episode_id)
     if existing is not None and not existing.done():
         return False
-    # A force already cleared next_retry_at and scheduled once. A stale
-    # candidate list must not start that episode, or a capacity wait, early.
+    # Hold only a force-owned queue and a capacity wait that is not due.
+    # failed / ready / not_required, including a ready guide whose mode
+    # changed, still start.
     if not podcast_premium_guide_service.premium_guide_auto_schedule_allowed(
         db_sink.engine, episode_id
     ):
