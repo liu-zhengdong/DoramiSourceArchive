@@ -35,6 +35,7 @@ import LogoMark from './LogoMark';
 import BrandLogoImage from './BrandLogoImage';
 import RailLogoutAvatar from './RailLogoutAvatar';
 import ReaderMarkdown from './ReaderMarkdown';
+import PaperContentNote from './PaperContentNote';
 import ReaderAiPanel from './ReaderAiPanel';
 import ShareMenu from './ShareMenu';
 import ContextMenu from './ContextMenu';
@@ -1473,6 +1474,9 @@ export default function ReaderTab({
                   onGenerate={handleSummarize}
                   podcast={podcastView}
                 />
+              )}
+              {!podcastView && (
+                <PaperContentNote article={activeArticle} />
               )}
               {/* 播客:「节目简介 | ✦ 导读稿」切换(有导读稿时出现)+ 逐字稿;节目简介正文仍是 paneCopy 这一块 */}
               {podcastView ? (

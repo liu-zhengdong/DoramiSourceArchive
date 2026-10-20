@@ -7,6 +7,7 @@ import {
   Star,
 } from 'lucide-react';
 import ReaderMarkdown from '../ReaderMarkdown';
+import PaperContentNote from '../PaperContentNote';
 import ShareMenu from '../ShareMenu';
 import PodcastExperiencePanel from '../PodcastExperiencePanel';
 import ListenEntries from '../player/ListenEntries';
@@ -222,6 +223,9 @@ export default function MobileArticlePage({
               onGenerate={handleSummarize}
               podcast={podcastView}
             />
+          )}
+          {!podcastView && (
+            <PaperContentNote article={activeArticle} />
           )}
           {podcastView ? (
             <PodcastExperiencePanel
