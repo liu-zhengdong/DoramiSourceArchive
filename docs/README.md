@@ -82,7 +82,6 @@
 - ☐ [plans/issue-178-content-classification.md](./plans/issue-178-content-classification.md) — **内容分类与双评分(issue #178)**:第一波 / 第一波补 / 第二波 / 3a 已上线(v3.64),3b 播客提示词拆分与 3c 新闻尺子收紧排队,分区空板率与论文名额观察期。
 - ☐ [plans/issue-82-node-watchdog-layer1.md](./plans/issue-82-node-watchdog-layer1.md) — **节点看护第一层:抓取失败判定升级(issue #82)**:R2 稿已拍板,PR-0 已修调度重载 bug,PR-A / B / C(产出轴 `yield_status`、收据先行、看护页)未动工;生产回放校准结论在此。
 - ☐ [plans/issue-97-podcast-cost-and-scoring.md](./plans/issue-97-podcast-cost-and-scoring.md) — **Podcast 成本门控与评分标定(issue #97)**:P0 门控已上线;P1 六组 32 输入黄金集与提示词调整未启动。
-- ☐ [plans/issue-41-paper-fulltext.md](./plans/issue-41-paper-fulltext.md) — **论文全文补全与摘要分析(issue #41)**:官方 arXiv HTML 优先、数学与图表转换、持久任务与回填;已随 v3.66.0 合入,issue 待收口关闭。
 - ☐ [plans/issue-132-intelligent-butler.md](./plans/issue-132-intelligent-butler.md) — **智能管家(issue #132,Clowder AI,R1 设计稿)**:Mac mini 常驻 agent、运行日报 / 主动预警 / 投递回执 / 反馈归并 / 自愈;排队中,未部署。
 - ☐ [plans/issue-210-docs-tidy.md](./plans/issue-210-docs-tidy.md) — **文档整理波(issue #210)**:盘点数字、三层分发模型、CLAUDE.md 节级去向、逐文件与记忆逐条裁决、拍板 D1–D10、执行清单(文中路径为迁移前)。
 
@@ -93,6 +92,8 @@
 ## archive/ —— 已完结方案与执行记录(⊘ 归档;索引 [archive/README.md](./archive/README.md))
 
 计划已落地或被取代的文档,按「故事」分组:2026-07 的阅读器演进五轮 / 源扩容 / 静默仪器重构 / 前后端重构 / 实体简化 / crawl4ai 选型 / 竞品对照,以及 2026-10-21 归档的 28 篇 2026-07 → 2026-10 波次方案(评分与早报 / 检索与翻译 / 播客 / 来源 / 管理面 / 部署运维 / 视觉),Podcast Intelligence 的 spec-kit 规格与报告在 `archive/podcast-intelligence/`。**查决策来龙去脉才来这里;判断现状看 `docs/architecture/` 与代码。**
+
+#41 于 2026-10-22 按首期范围收口，见 [论文全文阅读归档](./archive/issue-41-paper-fulltext.md)：HF/arXiv HTML 阅读、摘要分析、回填、FTS 优化与后续翻译修复均已落地；PDF/其它源/复杂排版等后续边界保留在待办展望。
 
 ## 仓外 / 其它
 

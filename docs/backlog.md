@@ -120,6 +120,10 @@
 
 ## 展望(用户表态、未立项)
 
+- **论文全文后续（#41 首期已完成，未立项）**：PDF/OCR 与 ar5iv 回退；HF 之外论文源的自动全文接入；复杂 SVG、嵌套表格、自定义宏和 PDF 级排版保真；成功任务的存量重转换及 arXiv 修订自动跟踪；公开全文分发许可策略。
+  触发：出现具体不可读论文、转换失真、版本更新或全文授权交付需求时，携带固定版本样本另建 issue；不自动全库重抓/重译，不改变论文自动分析只用摘要的成本边界。
+  结构完整不等同语义正确，图片内文字翻译与任意术语/语义质量仍需独立评估；细节见 [归档 §0](./archive/issue-41-paper-fulltext.md)。这些是已明确后置的范围，不作为 #41 未完成项。
+
 - ◇ **鸿蒙原生应用套壳**（#85 用户确认的后续方向）：保留现有 Web 阅读器，以鸿蒙原生应用承载。
   本轮不设计桥接、打包或分发，也不将鸿蒙 PWA 安装作为 #85 验收要求。
 - ◇ **兴趣走出早报 · 后续波次**(issue #27 第一波 v3.52.0 已落地,方案 `docs/archive/interest-lens-wave-plan.md`):
@@ -192,6 +196,8 @@
 - **日报 `per_source_cap=5` 是软配额**:`select_top` 的 overflow 补位可再加同源条目,淡日单源可能超过 5 篇(The Decoder 入名单后更可能出现);若运营要硬上限需改 overflow 语义。
 
 ## 已完结(近期,留档索引;执行记录与更早波次见 `docs/archive/README.md`)
+
+- ☑ **issue #41 论文全文阅读首期**（v3.66.0；2026-10-22 用户确认收口）：HF 官方 arXiv HTML 异步补全、章节/图片/公式/表格与基本排版、失败回退摘要、摘要分析边界、默认 dry-run 回填及 FTS 更新优化由 #201 完成；真实 R1 翻译问题由 #206/#207 修复，后台续译由 #208 完成（#202 已关闭）。测试、目检与交叉审查见 [归档方案](./archive/issue-41-paper-fulltext.md)；后续边界已单列上方展望。
 
 - ✅ **issue #150 CI 后端测试并行化**(PR #151,归因与检视记录在 `docs/version-history.md`):后端拆 `backend-unit` / `backend-deploy` 两 job 各 `-n 4 --dist worksteal`
   + `backend (pytest)` 汇总门 + conftest 按 worker 沙箱 + 守卫 `tests/test_ci_workflow.py`(11 种反向对照);PR CI 实测整次 run 6.0 min(此前 28 min)。

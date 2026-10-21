@@ -1,6 +1,25 @@
 # 论文全文补全与摘要分析
 
-> 状态:进行中(实现已随 v3.66.0 合入,issue 待收口关闭)
+> 状态:归档(2026-10-22，用户确认按首期范围完成并关闭 #41；实现已随 v3.66.0 发布)
+>
+> 本文保留实施时的设计、验证与检视记录；历史段落中的“本次不实现”不代表当前仍待办。现状以 `docs/architecture/` 与代码为准，后续边界见下方收口说明及 [`../backlog.md`](../backlog.md)。
+
+## 0. 收口说明（2026-10-22）
+
+#41 按已拍板的首期范围完成。最初 issue 中的 ar5iv/PDF 回退、其它源扩展与整篇配图预取属于范围建议，最终采用官方 arXiv HTML、HF 首期接入与配图按需缓存；关闭不表示所有论文都能无损转换。
+
+| 已完成范围 | 实现与验证依据 |
+|---|---|
+| HF Daily Papers 原位异步补全官方 arXiv HTML；保留章节、图注、图片、公式与表格，补齐基本字体和对齐；不可用或超限回退摘要，受限结构标 partial | [PR #201](https://github.com/zlzfun/DoramiSourceArchive/pull/201)；20 篇固定版本样本为 12 篇完整、5 篇 partial、3 篇回退，17 篇渲染共 2,445 个 KaTeX 实例无解析错误；桌面/手机、亮/暗主题验收见 §6 |
+| 自动分析及日报链路使用摘要；有界抓取、按需图片缓存、默认 dry-run 存量回填；FTS 避免元数据更新重写索引 | PR #201；回填、摘要输入、同步及迁移守卫见 §2–§5、§8 |
+| 全文翻译完整性保护、结构化单元、公式/表格数值保护及有限术语保护；R1 真实模型全文验证 | [PR #206](https://github.com/zlzfun/DoramiSourceArchive/pull/206)、[PR #207](https://github.com/zlzfun/DoramiSourceArchive/pull/207)；[R1 实测记录](./r1-translation-validation.md)，最终轮 20 次调用、20.473 秒、51,534 token，33 个公式和 6 张表结构/数值检查通过 |
+| 后台翻译、分段续译、刷新/重启恢复、取消、任务去重、额度预留与检查点清理 | [PR #208](https://github.com/zlzfun/DoramiSourceArchive/pull/208)；[#202](https://github.com/zlzfun/DoramiSourceArchive/issues/202) 已关闭，[后台翻译记录](./background-translation-plan.md) |
+
+上述 PR 均已合入并包含在 [v3.66.0](https://github.com/zlzfun/DoramiSourceArchive/releases/tag/v3.66.0)；测试、浏览器验收及 Claude Code 交叉审查记录保留在对应方案。此次仅做文档与 issue 收口，不增加新的实现或验证结论。
+
+**后续边界（未实现，不阻塞首期关闭）**：PDF/OCR 与 ar5iv 回退；HF 之外论文源的自动全文接入；复杂 SVG、嵌套表格、自定义宏及 PDF 级版式保真；成功任务随转换器升级的存量重转换与 arXiv 修订自动跟踪；公开全文分发的许可策略。翻译结构校验不证明任意语义正确，也不翻译图片内的文字；模型已生成而检查点未落库的崩溃窗口仍可能重复付费。
+
+这些项目留在待办展望中，出现实际覆盖缺口、失真样本、版本更新或授权需求时再单独立项，不以“继续 #41”隐含扩大首期承诺。
 
 Issue [#41](https://github.com/zlzfun/DoramiSourceArchive/issues/41)。2026-10-20 用户批准官方 HTML 优先的实现路径，论文自动分析只使用摘要，在独立分支与 worktree 开发。
 
@@ -172,7 +191,7 @@ node scripts/validate_paper_render.mjs /tmp/dorami-paper-validation
 模型正常结束和结构一致不能证明语义翻译无遗漏，真实质量与术语一致性仍需单独评测。
 结束原因按大小写和首尾空白归一化，缺失时仍拒绝；当前隔离预览禁用 LLM，
 初轮离线验证没有实测模型；后续真实 `deepseek-flash` 验证及发现的语义错译见
-[R1 全文翻译实测](../archive/r1-translation-validation.md)。
+[R1 全文翻译实测](./r1-translation-validation.md)。
 
 FTS 更新触发器仅在 `title`、`content` 或 SQLite `rowid` 真正变化时撤旧插新，比较采用 null-safe `IS NOT`。
 迁移 `f41b7c29d602`（父 `c41a8e20d610`）仅替换更新触发器，不重建全文索引；回退恢复旧触发器，

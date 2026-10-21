@@ -13,6 +13,7 @@
 
 > 顺序为迁入时原样(待发布波在前、纪元叙事在中、近期波在后);每行只记「现状是什么 / 落在哪」,详细记录在下文各节。
 
+- **论文全文阅读首期收口(issue #41,v3.66.0；2026-10-22)**：#201 全文阅读/摘要分析/回填/FTS 优化、#206/#207 翻译修复、#208 后台续译已完成；方案归档至 `docs/archive/issue-41-paper-fulltext.md`，后置范围进入 backlog 展望。
 - **文档整理波(issue #210,2026-10-21,待合入)**:L0 = `AGENTS.md` 正文(≤ 220 行)+ `CLAUDE.md` `@AGENTS.md`;Key Design Decisions 等原文迁入 `docs/architecture/` `reference/` `dev/` `ops/`;28 篇完结方案 + `specs/` `artifacts/` + 零引用样页归档;新建 `decisions.md`(ADR-lite)、`docs/dev/workflow.md`、`.claude/rules/` 四枚、项目技能三枚、守卫 `scripts/check_docs.py`;方案 `docs/plans/issue-210-docs-tidy.md`。
 - **社交流翻译(issue #84,待发布)**:推文卡片最后一行「✦ 译为中文」(管整张卡片,「显示更多」仍只管正文折叠),原文一字不动、译文追加在正文下与引用卡内;`POST /api/reader/ai/social/{id}/translate` 主推(转推取 `reposted.text`)+ 引用推一次 JSON 调用、复用 #201 分段 / #206 逐行单元协议与完整输出校验,缓存 `translation_zh_social`(不与文章 `translation_zh` 混用);可译判定按 X `lang` + 中文启发式,前后端共用 `tests/fixtures/social_translate_cases.json`,规范化补存内嵌推文 `lang`;经软准入闸的读者 AI 接口日额度 429 统一带 `Retry-After`(距服务端零点,前端按它恢复入口);X API 无翻译能力;方案 `docs/archive/social-translate-plan.md`,样页 `docs/design/social-translate/`。
 - **前端细项优化波(issue #199,待发布)**:源栏每源未读数撤回、条目未读小蓝点取缔(读态只靠标题字重与墨色,读屏补「未读」);播客区重设计为**全局播放条**——`components/player/`:`PlayerProvider` 挂在 `ReaderWorkspace`、全工作区唯一 `<audio>`(换文章 / 容器 / 页面、桌面 ⇄ 移动互切不中断,同标签页刷新恢复为暂停,退出清空,Media Session),标题区收听入口 `ListenEntries`(原节目 / 精品导读 / 点播 / 生成中,文章「✦ 听导读」共用),`PlayerDock` 内容区浮层条 ⇄ 右下迷你(WAAPI 形变只动合成属性,软件渲染自动轻量档),封面模糊底 `utils/coverTone.js`(遮罩逐张算到 4.5:1,混色只用 oklab);播客正文「节目简介 | ✦ 导读稿」切换与音轨解耦;`PodcastAudioPanel` / `ArticleListenBar` 退役;样页 `docs/design/podcast-player/`,规则 conventions §7 / §8。
@@ -42,6 +43,12 @@
 - **3.58–3.60(2026-09-15–19)**:运维面播客与分析标签重构(#76)/ 移动端读者 E2E(#91)/ 同步修复(#96 / #99)/ PWA 主屏幕安装(#100)/ 弹窗遮罩关闭判定(#104)/ OSS 持久存储与自动备份(#109)/ 聚焦环入 base 层(#108)/ 发现页按形态批量订阅(#113)/ **GitHub Release 自动部署流水线(#102,v3.60.0 首发、v3.60.1 闭环)**:tag 推上去 → 自动建 Release → 串联 `deploy.yml` 停在 Environment `production` 等批准 → SSH forced command 触发生产机仓库外 launcher/worker → 目标 tag 的 `./deploy-docker.sh` → 公网 `/api/health` 核对;上线抓到两坑(checkout 改写 tag 引用 / Environment secrets 须 `secrets: inherit`),见 `docs/archive/auto-deploy-plan.md` §7。
 - **裸机部署回滚(issue #126,2026-09-21,待发布)**:裸机路径改「运行副本版本化」release 形态 + 锁内事务 + 两级健康门告警(不自动回滚)+ `./deploy.sh --rollback`(树外固化执行体,DB 按目标上下文迁移计划分流,`--restore-db` 显式恢复,只回一代)+ 收养 + `--code` / `--status` / `--discard-txn`;extras 钉版 `docker/requirements-crawl4ai.txt`;方案 `docs/archive/baremetal-rollback-plan.md`(codex 四轮设计检视 + §9 实现记录),手册 `docs/ops/deploy-baremetal.md`,桩测试 `tests/test_deploy_baremetal.py`。
 - **Podcast(issue #7 P0–P0.2)**:`source_type=podcast` → `generic_podcast_rss`,单集复用 `ArticleRecord` + `extensions_json`,只解析 enclosure 元数据不下载音频;36 节目策展目录 `services.podcast_catalog` 启动幂等安装、进普通采集任务不设源级开关;边界与后续见 `docs/archive/podcast-wave-plan.md`。
+
+## issue #41 论文全文阅读首期收口（v3.66.0，2026-10-22）
+
+用户确认关闭 #41 并同步归档方案。核对 #201/#206/#207/#208 均已合入且包含于 v3.66.0，#202/#204/#205 已关闭：首期交付 HF/arXiv 官方 HTML 全文阅读、图片/公式/表格与基本排版、摘要成本边界、默认 dry-run 回填、FTS 更新优化、结构化全文翻译和后台分段恢复。保留原方案中的固定版本样本、真实 R1 翻译实测、浏览器验收及 Claude Code 协商/复检记录，不将首期完成表述为所有论文无损覆盖。
+
+本轮纯文档收口：方案从 plans 移入 [归档](./archive/issue-41-paper-fulltext.md)，增加 §0 完成证据与后续边界；同步总索引、归档索引、feed 契约引用、待办、决策和原文档整理盘点注记。PDF/OCR、ar5iv、其它源接入、复杂版式、存量重转换/修订跟踪及公开全文许可策略留作展望，按真实需求另建 issue。执行 `scripts/check_docs.py` 与差异检查，不重复运行产品测试或真实模型翻译；本次不改代码、版本或部署。
 
 ## issue #84 社交流翻译(分支 `feat/issue-84-social-translate`,开发版 3.66.0-alpha,版本号以实际发版为准)
 

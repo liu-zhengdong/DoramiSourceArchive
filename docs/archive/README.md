@@ -53,6 +53,10 @@
 
 - [horizon-vs-dorami.md](./horizon-vs-dorami.md) — 与 Thysrael/Horizon 的抓取/日报原理对照。
 
+## 论文全文阅读（2026-10-22，issue #41 收口）
+
+- [issue-41-paper-fulltext.md](./issue-41-paper-fulltext.md) — HF/arXiv HTML 全文阅读、摘要分析、默认 dry-run 回填、翻译完整性与 FTS 优化；§0 汇总 #201/#206/#207/#208 的完成证据及 PDF/其它源/复杂排版/修订跟踪/授权边界。原方案与检视过程保留供追溯。
+
 ## 2026-07 → 2026-10 波次方案(2026-10-21 文档整理波 issue #210 归档)
 
 对应波次均已合入 / 发版;每篇文首有归档注,拍板与「明确不做」已摘入 [`../decisions.md`](../decisions.md)。按主题分组:

@@ -114,7 +114,7 @@
 | node-watchdog-layer1-plan.md | 已拍板、PR-0 已做、PR-A/B/C 未做 |
 | podcast-cost-and-scoring-calibration-plan.md | P1 黄金集未启动 |
 | intelligent-butler-plan.md(**未跟踪**,见 D7) | #132 排队中 |
-| paper-fulltext-plan.md | #41 仍开着(worktree 在) |
+| paper-fulltext-plan.md | 盘点时 #41 未收口；2026-10-22 用户确认首期完成，现已移入 [归档](../archive/issue-41-paper-fulltext.md)，后续边界进入 backlog 展望 |
 
 **已完结方案 → 归档**(对应波次已合入或已发版;核对自 `git log` / backlog「已完结」/ 版本史)
 
