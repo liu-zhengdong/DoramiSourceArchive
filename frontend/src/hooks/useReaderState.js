@@ -8,12 +8,21 @@ import {
   Eye,
   EyeOff,
   Link,
+  Sparkles,
   Star,
   StarOff,
   Trash2,
   Undo2,
 } from 'lucide-react';
 import { copyText } from '../utils/clipboard';
+import {
+  currentSocialTranslation,
+  nextSocialQuotaExpiry,
+  purgeExpiredSocialQuota,
+  socialQuotaActive,
+  socialQuotaUntil,
+  socialTranslationSignature,
+} from '../utils/socialTranslate';
 import { articleDeepLink } from '../utils/shareLink';
 import { stripDuplicateLeadingHeading } from '../utils/markdownTitle';
 import { createBulkSubscribeDeadline, waitForBulkSubscribeSettlement } from '../utils/bulkSubscribe';
@@ -52,6 +61,7 @@ import {
   fetchInterests,
   addFavorite,
   removeFavorite,
+  translateSocialPost,
   recordArticleRead,
   fetchUnreadCounts,
   markAllRead,
@@ -142,6 +152,7 @@ const hostOf = (url) => {
 export function useReaderState({
   showToast,
   account = null,
+  // 读者 AI 可用(全局总闸 ∧ 账户开关 ∧ 模型已配置):文章后台翻译(#208)与推文翻译菜单项(#84)随它出没
   aiEnabled = false,
   // ── 站内分享深链(#/reader/a/{id}):带 id 进来时直接开这篇,消费后回调清空 ──
   initialArticleId = '',
@@ -293,6 +304,26 @@ export function useReaderState({
     showTranslation, translating, translatedBody, translatedTitle, handleTranslate,
     translationJob, translationPollError, cancelTranslation, resumeTranslation,
   } = useArticleTranslation(activeArticle?.id, aiEnabled, showToast);
+
+  // ── 用户面 AI · 推文翻译(issue #84):社交流逐卡开合,桌面卡片 / 右键菜单 / 移动长按共用一份 ──
+  // id → { status: 'loading' | 'done' | 'error' | 'quota', open, text, quoted, message, sig, until }
+  // sig 是请求时的原文签名(原文变了旧状态作废),until 是 quota 的恢复时刻(服务端 Retry-After 换算)
+  const [socialTranslations, setSocialTranslations] = useState({});
+  const socialTranslationsRef = useRef(socialTranslations);
+  useEffect(() => { socialTranslationsRef.current = socialTranslations; }, [socialTranslations]);
+  // 额度用尽到点恢复(检视 R1-03 / 复检):定时器排到最早的恢复时刻,页面重新可见时再清一次
+  const nextQuotaExpiry = nextSocialQuotaExpiry(socialTranslations);
+  useEffect(() => {
+    if (nextQuotaExpiry == null) return undefined;
+    const purge = () => setSocialTranslations((prev) => purgeExpiredSocialQuota(prev));
+    const timer = setTimeout(purge, Math.max(0, nextQuotaExpiry - Date.now()) + 500);
+    const onVisible = () => { if (document.visibilityState === 'visible') purge(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [nextQuotaExpiry]);
 
   // ── 用户面 AI · 要点摘要(正文顶部「哆啦美速读」卡;缓存 id → 摘要)──
   const [activeSummary, setActiveSummary] = useState(null);
@@ -1245,6 +1276,42 @@ export function useReaderState({
     }
   };
 
+  // 推文翻译开合:已译过的只在本地开合(不再请求);首次 / 失败后重试 / 原文已变才发请求。服务端有缓存,
+  // 收起后换页回来再点也只是一次 HTTP、零模型调用。额度用尽(429)当天留在 quota 态,不给重试。
+  const toggleSocialTranslation = useCallback((article) => {
+    const id = article?.id;
+    const sig = socialTranslationSignature(article);
+    if (!id || !sig) return;
+    let entry = currentSocialTranslation(socialTranslationsRef.current[id], sig);
+    if (entry?.status === 'quota' && !socialQuotaActive(entry)) entry = null;
+    if (entry?.status === 'loading' || entry?.status === 'quota') return;
+    if (entry?.status === 'done') {
+      setSocialTranslations((prev) => ({ ...prev, [id]: { ...prev[id], open: !prev[id]?.open } }));
+      return;
+    }
+    // 回包只在该卡仍是同一签名的 loading 时落地:原文中途变了 / 旧请求晚到都不覆盖新状态(检视 R1-02);
+    // next 为 null 表示回到可点状态(移除该卡条目)
+    const settle = (next) => setSocialTranslations((prev) => {
+      if (prev[id]?.status !== 'loading' || prev[id].sig !== sig) return prev;
+      const rest = { ...prev };
+      if (next) rest[id] = { ...next, sig };
+      else delete rest[id];
+      return rest;
+    });
+    setSocialTranslations((prev) => ({ ...prev, [id]: { status: 'loading', open: false, sig } }));
+    translateSocialPost(id)
+      .then((data) => settle({ status: 'done', open: true, text: data?.text || null, quoted: data?.quoted || null }))
+      .catch((error) => {
+        if (error?.status !== 429) {
+          settle({ status: 'error', open: false, message: error?.message || '' });
+          return;
+        }
+        const until = socialQuotaUntil(error.retryAfter);
+        // 恢复时刻已过(零点前发出、零点后才回来的 429)就直接回到可点状态,不锁新一天
+        settle(until > Date.now() ? { status: 'quota', open: false, until, message: error.message || '' } : null);
+      });
+  }, []);
+
   const handleToggleSocialRead = useCallback(async (article) => {
     if (!article?.id || socialReadToggling) return;
     setSocialReadToggling(article.id);
@@ -1316,9 +1383,22 @@ export function useReaderState({
   const buildSocialMenuItems = (article) => {
     const unread = isArticleUnread(article);
     const fav = favoriteIds.has(article.id);
+    // 翻译项与卡片底栏同一个开关(issue #84):译文开着时是「收起译文」;状态按原文签名取,原文变了视为未翻译
+    const trSig = aiEnabled ? socialTranslationSignature(article) : '';
+    const tr = currentSocialTranslation(socialTranslations[article.id], trSig);
+    const translateItems = trSig
+      ? [{
+        key: 'translate',
+        label: tr?.status === 'done' && tr.open ? '收起译文' : '译为中文',
+        icon: Sparkles,
+        disabled: tr?.status === 'loading' || socialQuotaActive(tr),
+        onClick: () => toggleSocialTranslation(article),
+      }]
+      : [];
     return [
       { key: 'read', label: unread ? '标为已读' : '标为未读', icon: unread ? Check : Undo2, onClick: () => handleToggleSocialRead(article) },
       { key: 'fav', label: fav ? '取消收藏' : '收藏推文', icon: fav ? StarOff : Star, onClick: () => handleToggleFavorite(article) },
+      ...translateItems,
       { type: 'sep' },
       // 链接组复制/打开的都是原推外链(社交卡无详情页语义),与卡上时间戳外链同目标
       { key: 'copy', label: '复制推文链接', icon: Link, disabled: !article.source_url, onClick: () => copyWithToast(article.source_url, '已复制推文链接') },
@@ -1583,6 +1663,7 @@ export function useReaderState({
     showTranslation, translating, translatedBody, translatedTitle, activeIsChinese, handleTranslate,
     translationJob, translationPollError, cancelTranslation, resumeTranslation,
     activeSummary, summarizing, handleSummarize,
+    socialTranslations, toggleSocialTranslation,
     // 上下文菜单 items(桌面右键 / 移动长按共用)
     isAdminSession, buildArticleMenuItems, buildSourceMenuItems, buildSocialMenuItems,
   };

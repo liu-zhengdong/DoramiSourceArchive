@@ -273,7 +273,8 @@ def _protect(body: str, namespace: str | None = None) -> tuple[str, dict[str, st
     body = re.sub(r"(?m)^ {0,3}\[[^\]\n]+\]:[ \t]*(?P<destination>[^\n]*)",
                   lambda match: save(match[0]) if _valid_destination(match["destination"])
                   else match[0], body)
-    body = re.sub(r"https?://[^\s<>]+", lambda match: save(match[0]), body)
+    # 链接在 U+FEFF 处也截止(Python \s 不含它;合法链接里不会出现):与推文翻译的可译判定同一分隔规则(issue #84 检视)
+    body = re.sub(r"https?://[^\s<>\ufeff]+", lambda match: save(match[0]), body)
     body = _MATH.sub(lambda match: save(match[0]), body)
     body = _BILINGUAL_EVALUATION_TERM.sub(lambda match: save(match[0]), body)
     body = _EVALUATION_TERM.sub(

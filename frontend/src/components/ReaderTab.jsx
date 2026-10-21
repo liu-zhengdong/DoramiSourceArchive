@@ -440,6 +440,7 @@ export default function ReaderTab({
     showTranslation, translating, translatedBody, translatedTitle, activeIsChinese, handleTranslate,
     translationJob, translationPollError, cancelTranslation, resumeTranslation,
     activeSummary, summarizing, handleSummarize,
+    socialTranslations, toggleSocialTranslation,
     // 上下文菜单 items(桌面右键在此装配弹层)
     buildArticleMenuItems, buildSourceMenuItems, buildSocialMenuItems,
   } = rs;
@@ -1044,6 +1045,9 @@ export default function ReaderTab({
               ? '该账号暂时不可用'
               : socialSources.length === 0 ? '还没有订阅社交账号，去「发现」看看' : '暂无动态'
           }
+          translateEnabled={aiEnabled}
+          translations={socialTranslations}
+          onToggleTranslation={toggleSocialTranslation}
         />
       )}
 
