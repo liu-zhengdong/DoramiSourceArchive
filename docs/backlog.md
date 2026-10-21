@@ -13,6 +13,8 @@
   有意不做:归档文档内容不改写(只加归档注);`docs/sources/` `contracts/` `frontend/` 的既有文档不补状态行(守卫只对 plans / architecture / dev / reference / ops 新文件强制);未跟踪的 `scripts/netcheck.*`(内网专属,归 master)与两页未立项样页不入库。
 - ☐ **issue #199 前端细项优化波**(分支 `feat/issue-199-frontend-polish`,记录见 `docs/version-history.md`):撤回源栏每源未读数、取缔条目未读小蓝点、播客区重设计为全局播放条(样页 `docs/design/podcast-player/`)三项已实现并经用户目检,待 Codex 本地检视 → PR 合入。
   遗留(本波有意不做):Windows 实机看一遍播放条(只做了理论判断);播客导读生成完成后入口要等约 30 秒的分析轮询才刷新;生产里封面代理 302 回源成跨域时回落中性底的路径未端到端;部分播客节目简介里链接文字独占一行——库里存的简介原文即如此断行,是抓取时 HTML 转文本的问题(Interconnects 等 Substack 源可见),与播放器无关。
+- ☐ **issue #212 文章分析提示词按类型装配**(RFC,未开工):规则已判定 `kind_hint` 时只发该类型的内容价值标准(通用段照发),判不出才发全套;`article-analysis-v8`,尺子版本号不动;门禁 = 74 篇内容价值黄金集 + 62 篇新闻黄金集不劣于 v7;近 7 天约 700 篇随巡检重跑。
+  有意不做:每类一套提示词;论文专用提示词等 3c 定下论文的新闻维度后一并评估。
 - ☐ **issue #178 内容分类与双评分**(方案 `docs/plans/issue-178-content-classification.md`,样页 `docs/design/dorami-classification-scores-quiet.html`):
   第一波已合入(#180):内容类型 / 事件类型读取时推导 +「动态」并入「文章」+ 类型签 / 筛选带 / 紧凑行 + 词表收口。
   第一波补已合入(#181):`category` 拆出 `admission_status` 后退役、源级 `content_tags` 退役、条目标签不再拼入源级分类。
