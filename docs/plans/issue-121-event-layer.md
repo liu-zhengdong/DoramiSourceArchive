@@ -129,7 +129,7 @@ publisher_key    = 注册表 source_owner 非空 ? source_owner : source_id;合�
 - `GET /api/admin/events?status=&q=&limit=`(管理台抽屉列表)· `POST /api/admin/events/{id}/merge-into/{target}` · `POST /api/admin/events/{id}/members/{article_id}/detach`(摘出成新单成员事件并写 ledger `blocked_event_ids`)——全部入审计。
 - 内部:`services/event_assignment.assign_pending(engine, llm_config)`(分析周期末尾 + 10 分钟兜底 interval job)· `services/event_board.build_rank_snapshot(engine, date)`(cron `0 7 * * *`,job id `event_rank_snapshot`)。
 
-### 5.1 榜单页第三段「热点」(**搁置**,随榜单前端统一重构;以下为原设想)
+### 5.1 榜单页第三段「热点」(**搁置**,随榜单前端统一重构 issue #221;以下为原设想)
 
 - 落点:`RankingsPage.jsx` 的 shape 分段从「文章榜 / 播客榜」加「热点」,不新开页面;发现页「榜单」入口与轨底 `reader-ranking-entry` 不变;移动壳同列表。
 - 行:事件标题 · 来源 N(发布主体)· 热度 · 更新时间 · 排名变化;点开抽屉:代表报道(可进阅读窗)、来源列表(按发布主体分组、可点原文)、
